@@ -1,0 +1,10 @@
+# STM32CubeIDE build output
+components/Debug/
+components/Release/
+
+# Local CubeIDE/debug state
+components/*.launch
+components/.settings/com.st.stm32cube.ide.mcu.sfrview.prefs
+
+# OS/editor noise
+.DS_Store
