@@ -104,7 +104,7 @@ HAL_StatusTypeDef ST7789_FillRect(ST7789_HandleTypeDef *display,
                                   uint16_t h,
                                   uint16_t color)
 {
-  uint8_t color_data[64U * 2U];
+  static uint8_t color_data[256U * 2U];
   uint32_t pixels;
   uint32_t chunk_pixels;
 
@@ -123,7 +123,7 @@ HAL_StatusTypeDef ST7789_FillRect(ST7789_HandleTypeDef *display,
     h = ST7789_HEIGHT - y;
   }
 
-  for (uint32_t i = 0U; i < 64U; i++)
+  for (uint32_t i = 0U; i < 256U; i++)
   {
     color_data[(i * 2U)] = (uint8_t)(color >> 8U);
     color_data[(i * 2U) + 1U] = (uint8_t)(color & 0xFFU);
@@ -137,7 +137,7 @@ HAL_StatusTypeDef ST7789_FillRect(ST7789_HandleTypeDef *display,
   pixels = (uint32_t)w * (uint32_t)h;
   while (pixels > 0U)
   {
-    chunk_pixels = (pixels > 64U) ? 64U : pixels;
+    chunk_pixels = (pixels > 256U) ? 256U : pixels;
     if (ST7789_WriteData(display, color_data, (uint16_t)(chunk_pixels * 2U)) != HAL_OK)
     {
       return HAL_ERROR;

@@ -9,18 +9,37 @@ volatile uint32_t audio_sample_abs_avg = 0U;
 volatile uint32_t audio_sample_peak = 0U;
 volatile uint32_t audio_sample_level_smooth = 0U;
 volatile uint32_t audio_sample_noise_floor = 0U;
+volatile uint8_t audio_sample_noise_floor_frozen = 0U;
+volatile uint32_t audio_sample_noise_floor_freeze_count = 0U;
 volatile uint32_t audio_sample_signal_level = 0U;
 volatile uint32_t audio_sample_signal_smooth = 0U;
 volatile uint32_t audio_sample_left_abs_avg = 0U;
 volatile uint32_t audio_sample_right_abs_avg = 0U;
 volatile uint8_t audio_sample_active_slot = 0U;
+volatile uint8_t audio_sample_slot_mode = AUDIO_I2S_SLOT_AUTO;
+volatile uint8_t audio_sample_slot_locked = 0U;
+volatile uint32_t audio_sample_slot_detect_blocks = 0U;
+volatile uint32_t audio_sample_slot_lock_count = 0U;
 volatile uint32_t audio_sample_process_count = 0U;
 volatile uint32_t audio_sample_debug_raw_left = 0U;
 volatile uint32_t audio_sample_debug_raw_right = 0U;
 
 static int32_t AudioSamples_Raw32ToSigned24(uint32_t raw);
 static uint32_t AudioSamples_Abs32(int32_t value);
+static uint8_t AudioSamples_SelectedGateOpen(void);
 static void AudioSamples_UpdateNoiseMetrics(uint32_t abs_avg);
+static uint8_t AudioSamples_SelectI2sSlot(uint32_t left_abs_avg,
+                                         uint32_t right_abs_avg);
+
+#define AUDIO_I2S_SLOT_AUTO_EARLY_BLOCKS 2U
+#define AUDIO_I2S_SLOT_AUTO_LOCK_BLOCKS 8U
+#define AUDIO_I2S_SLOT_AUTO_RATIO       4U
+#define AUDIO_I2S_SLOT_AUTO_MIN_LEVEL   64U
+
+static uint8_t audio_sample_slot_mode_cached = UINT8_MAX;
+static uint8_t audio_sample_slot_auto_value = AUDIO_I2S_SLOT_LEFT;
+static uint64_t audio_sample_slot_left_accum = 0U;
+static uint64_t audio_sample_slot_right_accum = 0U;
 
 uint32_t AudioSamples_UnpackI2s32(const uint16_t *raw_buf, uint32_t raw_len)
 {
@@ -59,7 +78,8 @@ uint32_t AudioSamples_UnpackI2s32(const uint16_t *raw_buf, uint32_t raw_len)
 
   audio_sample_left_abs_avg = (uint32_t)(left_abs_sum / frame_count);
   audio_sample_right_abs_avg = (uint32_t)(right_abs_sum / frame_count);
-  active_slot = (audio_sample_right_abs_avg > audio_sample_left_abs_avg) ? 1U : 0U;
+  active_slot = AudioSamples_SelectI2sSlot(audio_sample_left_abs_avg,
+                                           audio_sample_right_abs_avg);
   audio_sample_active_slot = active_slot;
 
   for (uint32_t i = 0U; (i + 3U) < raw_len; i += 4U)
@@ -129,6 +149,28 @@ uint32_t AudioSamples_UnpackI2s32(const uint16_t *raw_buf, uint32_t raw_len)
   audio_sample_process_count++;
 
   return out_count;
+}
+
+void AudioSamples_ResetI2sSlotSelection(void)
+{
+  audio_sample_slot_mode_cached = UINT8_MAX;
+  audio_sample_slot_auto_value = AUDIO_I2S_SLOT_LEFT;
+  audio_sample_slot_left_accum = 0U;
+  audio_sample_slot_right_accum = 0U;
+  audio_sample_active_slot = AUDIO_I2S_SLOT_LEFT;
+  audio_sample_slot_locked = 0U;
+  audio_sample_slot_detect_blocks = 0U;
+  audio_sample_slot_lock_count = 0U;
+  AudioSamples_ResetNoiseMetrics();
+}
+
+void AudioSamples_ResetNoiseMetrics(void)
+{
+  audio_sample_noise_floor = 0U;
+  audio_sample_noise_floor_frozen = 0U;
+  audio_sample_noise_floor_freeze_count = 0U;
+  audio_sample_signal_level = 0U;
+  audio_sample_signal_smooth = 0U;
 }
 
 void AudioSamples_UpdateFromS32(const int32_t *samples, uint32_t len)
@@ -203,30 +245,126 @@ static uint32_t AudioSamples_Abs32(int32_t value)
   return (value < 0) ? (uint32_t)(-value) : (uint32_t)value;
 }
 
+static uint8_t AudioSamples_SelectedGateOpen(void)
+{
+  if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
+  {
+    return (aux_output_gate_open != 0U) ? 1U : 0U;
+  }
+
+  return (i2s_mic_gate_open != 0U) ? 1U : 0U;
+}
+
+static uint8_t AudioSamples_SelectI2sSlot(uint32_t left_abs_avg,
+                                         uint32_t right_abs_avg)
+{
+  uint8_t mode = audio_sample_slot_mode;
+
+  if (mode > AUDIO_I2S_SLOT_AUTO)
+  {
+    mode = AUDIO_I2S_SLOT_AUTO;
+    audio_sample_slot_mode = mode;
+  }
+
+  if (mode != audio_sample_slot_mode_cached)
+  {
+    audio_sample_slot_mode_cached = mode;
+    audio_sample_slot_locked = 0U;
+    audio_sample_slot_detect_blocks = 0U;
+    audio_sample_slot_left_accum = 0U;
+    audio_sample_slot_right_accum = 0U;
+  }
+
+  if (mode != AUDIO_I2S_SLOT_AUTO)
+  {
+    audio_sample_slot_locked = 1U;
+    audio_sample_slot_auto_value = mode;
+    return mode;
+  }
+
+  if (audio_sample_slot_locked == 0U)
+  {
+    audio_sample_slot_left_accum += left_abs_avg;
+    audio_sample_slot_right_accum += right_abs_avg;
+    audio_sample_slot_detect_blocks++;
+
+    if ((audio_sample_slot_detect_blocks >=
+         AUDIO_I2S_SLOT_AUTO_EARLY_BLOCKS) &&
+        (left_abs_avg >= AUDIO_I2S_SLOT_AUTO_MIN_LEVEL) &&
+        ((uint64_t)left_abs_avg >=
+         ((uint64_t)right_abs_avg * AUDIO_I2S_SLOT_AUTO_RATIO)))
+    {
+      audio_sample_slot_auto_value = AUDIO_I2S_SLOT_LEFT;
+      audio_sample_slot_locked = 1U;
+    }
+    else if ((audio_sample_slot_detect_blocks >=
+              AUDIO_I2S_SLOT_AUTO_EARLY_BLOCKS) &&
+             (right_abs_avg >= AUDIO_I2S_SLOT_AUTO_MIN_LEVEL) &&
+             ((uint64_t)right_abs_avg >=
+              ((uint64_t)left_abs_avg * AUDIO_I2S_SLOT_AUTO_RATIO)))
+    {
+      audio_sample_slot_auto_value = AUDIO_I2S_SLOT_RIGHT;
+      audio_sample_slot_locked = 1U;
+    }
+    else if (audio_sample_slot_detect_blocks >=
+             AUDIO_I2S_SLOT_AUTO_LOCK_BLOCKS)
+    {
+      audio_sample_slot_auto_value =
+          (audio_sample_slot_right_accum > audio_sample_slot_left_accum) ?
+          AUDIO_I2S_SLOT_RIGHT : AUDIO_I2S_SLOT_LEFT;
+      audio_sample_slot_locked = 1U;
+    }
+
+    if (audio_sample_slot_locked != 0U)
+    {
+      audio_sample_slot_lock_count++;
+    }
+  }
+
+  if (audio_sample_slot_locked != 0U)
+  {
+    return audio_sample_slot_auto_value;
+  }
+
+  /* Detection lasts only a few startup blocks; use the louder slot meanwhile. */
+  return (right_abs_avg > left_abs_avg) ?
+         AUDIO_I2S_SLOT_RIGHT : AUDIO_I2S_SLOT_LEFT;
+}
+
 static void AudioSamples_UpdateNoiseMetrics(uint32_t abs_avg)
 {
   uint32_t floor = audio_sample_noise_floor;
   uint32_t signal;
+  uint8_t freeze_upward = AudioSamples_SelectedGateOpen();
 
   /*
    * audio_sample_peak is intentionally spiky. This estimates the background
    * level from the block average and then reports the signal above that floor.
    *
-   * If the room gets quieter, the floor moves down fairly quickly.
-   * If the room gets louder, the floor moves up slowly so speech/taps still
-   * show up as signal instead of being swallowed immediately.
+   * If the room gets quieter, the floor moves down fairly quickly. Upward
+   * movement is allowed only while the selected input gate is closed; this
+   * prevents sustained audio from being learned as background noise.
    */
-  if ((audio_sample_process_count == 0U) || (floor == 0U))
+  audio_sample_noise_floor_frozen = freeze_upward;
+  if (freeze_upward != 0U)
   {
-    floor = abs_avg;
+    audio_sample_noise_floor_freeze_count++;
   }
-  else if (abs_avg < floor)
+
+  if (abs_avg < floor)
   {
     floor = ((floor * 7U) + abs_avg) / 8U;
   }
-  else
+  else if (freeze_upward == 0U)
   {
-    floor = ((floor * 255U) + abs_avg) / 256U;
+    if ((audio_sample_process_count == 0U) || (floor == 0U))
+    {
+      floor = abs_avg;
+    }
+    else
+    {
+      floor = ((floor * 255U) + abs_avg) / 256U;
+    }
   }
 
   audio_sample_noise_floor = floor;

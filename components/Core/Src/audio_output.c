@@ -1,9 +1,13 @@
 #include "audio_output.h"
+#include "audio_config.h"
 
 #define AUDIO_OUT_MIC_RING_LEN 1024U
-#define AUDIO_OUT_DEFAULT_MIC_GAIN_Q8 512U
+#define AUDIO_OUT_DEFAULT_MIC_GAIN_Q8 256U
 #define AUDIO_OUT_LIMIT_THRESHOLD 28000
 #define AUDIO_OUT_LIMIT_MAX 32000
+#define AUDIO_OUT_SAMPLE_RATE_HZ AUDIO_STREAM_SAMPLE_RATE_HZ
+#define AUDIO_OUT_TEST_TONE_LUT_LEN 32U
+#define AUDIO_OUT_TEST_TONE_MAX_HZ 8000U
 
 uint16_t audio_tx_buf[AUDIO_OUT_BUF_LEN];
 volatile uint32_t audio_out_start_status = HAL_ERROR;
@@ -13,6 +17,7 @@ volatile uint32_t audio_out_i2s_error_code = 0U;
 volatile uint32_t audio_out_dma_state_before_start = 0U;
 volatile uint32_t audio_out_dma_state_after_start = 0U;
 volatile uint32_t audio_out_dma_error_code = 0U;
+volatile uint32_t audio_out_i2s_runtime_error_count = 0U;
 volatile uint32_t audio_out_hdmatx_is_null = 1U;
 volatile uint32_t audio_out_half_count = 0U;
 volatile uint32_t audio_out_full_count = 0U;
@@ -29,6 +34,9 @@ volatile int16_t audio_out_tx_debug_samples[16];
 volatile uint8_t audio_out_force_test_tone = 0U;
 volatile uint32_t audio_out_mode_debug = AUDIO_OUTPUT_MODE_TEST_TONE;
 volatile uint32_t audio_out_test_tone_divider = 2U;
+volatile uint32_t audio_out_test_tone_frequency_hz = 1000U;
+volatile uint32_t audio_out_test_tone_frequency_applied_hz = 1000U;
+volatile uint32_t audio_out_test_tone_phase_step_q16 = 65536U;
 volatile uint32_t audio_out_block_len_debug = 0U;
 volatile uint32_t audio_out_dma_size_debug = 0U;
 volatile uint32_t audio_out_mic_push_count = 0U;
@@ -43,16 +51,16 @@ volatile uint8_t audio_out_mic_streaming = 0U;
 volatile uint32_t audio_out_mic_available_min = AUDIO_OUT_MIC_RING_LEN;
 volatile uint32_t audio_out_mic_available_max = 0U;
 /*
- * Q8 gain for mic monitor:
+ * Q8 gain for the legacy direct-S32 push path:
  *   256  = 1x
  *   512  = 2x
  *   1024 = 4x
  *   2048 = 8x
  *   4096 = 16x
  *
- * A strong AUX source can already reach most of the ADC range. Start at 2x
- * so test tones have headroom; raise this from Live Expressions for quiet
- * sources like phone/laptop music output.
+ * The normal I2S microphone path is conditioned before it reaches this module
+ * and uses i2s_mic_gain_q8. The AUX realtime path likewise pushes S16 and uses
+ * aux_output_gain_q8. This remains for diagnostic/fallback S32 pushes.
  */
 volatile uint32_t audio_out_mic_gain_q8 = AUDIO_OUT_DEFAULT_MIC_GAIN_Q8;
 volatile uint32_t audio_out_mic_repeat_factor = 1U;
@@ -73,6 +81,8 @@ volatile uint32_t audio_pwm_out_last_peak = 0U;
 volatile uint32_t audio_pwm_out_level_smooth = 0U;
 volatile uint32_t audio_pwm_out_clip_count = 0U;
 volatile int16_t audio_pwm_out_last_sample_s16 = 0;
+volatile uint32_t audio_pwm_out_noise_shape_enable = 1U;
+volatile int32_t audio_pwm_out_quant_error_q16 = 0;
 volatile uint8_t audio_pwm_out_ready = 0U;
 
 static int16_t audio_out_mic_ring[AUDIO_OUT_MIC_RING_LEN];
@@ -82,14 +92,15 @@ static TIM_HandleTypeDef *audio_pwm_out_sample_handle = NULL;
 static uint32_t audio_pwm_out_pwm_channel = TIM_CHANNEL_1;
 static uint32_t audio_pwm_out_period = 255U;
 static uint32_t audio_out_block_len = AUDIO_OUT_BUF_LEN / 2U;
-static AudioOutput_Mode_t audio_out_mode = AUDIO_OUTPUT_MODE_TEST_TONE;
-static uint32_t audio_out_phase = 0U;
+static volatile AudioOutput_Mode_t audio_out_mode = AUDIO_OUTPUT_MODE_TEST_TONE;
+static uint32_t audio_out_phase_q16 = 0U;
+static uint32_t audio_out_test_tone_frequency_cached_hz = UINT32_MAX;
 static volatile uint32_t audio_out_mic_write_index = 0U;
 static volatile uint32_t audio_out_mic_read_index = 0U;
 static int32_t audio_out_mic_dc_estimate = 0;
 static uint32_t audio_out_mic_repeat_remaining = 0U;
-static uint32_t audio_pwm_out_rate_last_tick = 0U;
-static uint32_t audio_pwm_out_rate_window_count = 0U;
+static uint32_t audio_pwm_out_rate_last_cycle = 0U;
+static uint32_t audio_pwm_out_rate_last_sample_count = 0U;
 
 static const int16_t audio_out_sine_lut[32] =
 {
@@ -103,8 +114,10 @@ static uint16_t AudioOutput_DmaSizeFrames(I2S_HandleTypeDef *hi2s);
 static uint8_t AudioOutput_IsActiveI2S(I2S_HandleTypeDef *hi2s);
 static int16_t AudioOutput_Limit16(int32_t value);
 static int16_t AudioOutput_ConvertMicSample(int32_t sample);
+static void AudioOutput_PushRingSample16(int16_t sample16);
 static int16_t AudioOutput_ReadMicSample(void);
 static int16_t AudioOutput_NextSample16(void);
+static void AudioOutput_UpdateTestToneFrequency(void);
 static uint32_t AudioOutput_Abs16(int16_t value);
 static uint32_t AudioOutput_MicAvailable(void);
 static void AudioOutput_UpdateAvailableDebug(uint32_t available);
@@ -154,7 +167,8 @@ HAL_StatusTypeDef AudioOutput_Start(I2S_HandleTypeDef *hi2s)
   audio_out_tx_debug_update_count = 0U;
   audio_out_tx_zero_block_count = 0U;
   audio_out_tx_nonzero_block_count = 0U;
-  audio_out_phase = 0U;
+  audio_out_phase_q16 = 0U;
+  audio_out_test_tone_frequency_cached_hz = UINT32_MAX;
   audio_out_mic_underrun_count = 0U;
   audio_out_mic_overrun_count = 0U;
   audio_out_mic_peak = 0U;
@@ -167,6 +181,20 @@ HAL_StatusTypeDef AudioOutput_Start(I2S_HandleTypeDef *hi2s)
   audio_out_limiter_count = 0U;
   audio_out_limiter_last_input = 0;
   audio_out_limiter_last_output = 0;
+  audio_out_i2s_runtime_error_count = 0U;
+
+  if ((hi2s->hdmatx == NULL) ||
+      (hi2s->Init.Mode != I2S_MODE_MASTER_TX) ||
+      (hi2s->Init.Standard != I2S_STANDARD_PHILIPS) ||
+      (hi2s->Init.DataFormat != I2S_DATAFORMAT_16B) ||
+      (hi2s->Init.AudioFreq != I2S_AUDIOFREQ_32K) ||
+      ((hi2s->hdmatx != NULL) &&
+       (hi2s->hdmatx->Init.Mode != DMA_CIRCULAR)))
+  {
+    audio_out_start_status = HAL_ERROR;
+    audio_out_ready = 0U;
+    return HAL_ERROR;
+  }
 
   if (prefilled_available == 0U)
   {
@@ -193,6 +221,10 @@ HAL_StatusTypeDef AudioOutput_Start(I2S_HandleTypeDef *hi2s)
 
   status = HAL_I2S_Transmit_DMA(hi2s, audio_tx_buf, dma_size);
   audio_out_start_status = status;
+  if (status != HAL_OK)
+  {
+    audio_out_ready = 0U;
+  }
   audio_out_i2s_state_after_start = hi2s->State;
   audio_out_i2s_error_code = hi2s->ErrorCode;
   if (hi2s->hdmatx != NULL)
@@ -247,31 +279,43 @@ void AudioOutput_PushSamplesS32(const int32_t *samples, uint32_t count)
 
   for (uint32_t i = 0U; i < count; i++)
   {
-    uint32_t next_index;
     int16_t sample16 = AudioOutput_ConvertMicSample(samples[i]);
-
-    next_index = audio_out_mic_write_index + 1U;
-    if (next_index >= AUDIO_OUT_MIC_RING_LEN)
-    {
-      next_index = 0U;
-    }
-
-    if (next_index == audio_out_mic_read_index)
-    {
-      audio_out_mic_overrun_count++;
-      audio_out_mic_read_index++;
-      if (audio_out_mic_read_index >= AUDIO_OUT_MIC_RING_LEN)
-      {
-        audio_out_mic_read_index = 0U;
-      }
-    }
-
-    audio_out_mic_ring[audio_out_mic_write_index] = sample16;
-    audio_out_mic_write_index = next_index;
-    audio_out_mic_push_count++;
+    AudioOutput_PushRingSample16(sample16);
   }
 
   AudioOutput_UpdateAvailableDebug(AudioOutput_MicAvailable());
+}
+
+void AudioOutput_PushSamplesS16(const int16_t *samples, uint32_t count)
+{
+  if ((samples == NULL) || (count == 0U))
+  {
+    return;
+  }
+
+  for (uint32_t i = 0U; i < count; i++)
+  {
+    AudioOutput_PushRingSample16(samples[i]);
+  }
+
+  AudioOutput_UpdateAvailableDebug(AudioOutput_MicAvailable());
+}
+
+void AudioOutput_HandleI2sError(I2S_HandleTypeDef *hi2s)
+{
+  if (AudioOutput_IsActiveI2S(hi2s) == 0U)
+  {
+    return;
+  }
+
+  audio_out_i2s_runtime_error_count++;
+  audio_out_i2s_error_code = hi2s->ErrorCode;
+  if (hi2s->hdmatx != NULL)
+  {
+    audio_out_dma_error_code = hi2s->hdmatx->ErrorCode;
+  }
+  audio_out_ready = 0U;
+  audio_out_mic_streaming = 0U;
 }
 
 HAL_StatusTypeDef AudioPwmOutput_Start(TIM_HandleTypeDef *pwm_htim,
@@ -303,7 +347,11 @@ HAL_StatusTypeDef AudioPwmOutput_Start(TIM_HandleTypeDef *pwm_htim,
   audio_pwm_out_level_smooth = 0U;
   audio_pwm_out_clip_count = 0U;
   audio_pwm_out_last_sample_s16 = 0;
+  audio_pwm_out_noise_shape_enable = 1U;
+  audio_pwm_out_quant_error_q16 = 0;
   audio_pwm_out_ready = 0U;
+  audio_out_phase_q16 = 0U;
+  audio_out_test_tone_frequency_cached_hz = UINT32_MAX;
   audio_out_mic_underrun_count = 0U;
   audio_out_mic_overrun_count = 0U;
   audio_out_mic_peak = 0U;
@@ -316,8 +364,14 @@ HAL_StatusTypeDef AudioPwmOutput_Start(TIM_HandleTypeDef *pwm_htim,
   audio_out_limiter_count = 0U;
   audio_out_limiter_last_input = 0;
   audio_out_limiter_last_output = 0;
-  audio_pwm_out_rate_last_tick = HAL_GetTick();
-  audio_pwm_out_rate_window_count = 0U;
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
+  {
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  }
+  audio_pwm_out_rate_last_cycle = DWT->CYCCNT;
+  audio_pwm_out_rate_last_sample_count = 0U;
 
   if (prefilled_available == 0U)
   {
@@ -374,11 +428,43 @@ void AudioPwmOutput_HandleSampleTimer(TIM_HandleTypeDef *htim)
 
   sample = AudioOutput_NextSample16();
   pwm_steps = audio_pwm_out_period + 1U;
-  duty = (uint32_t)((((int64_t)sample + 32768LL) *
-                     (int64_t)pwm_steps) >> 16);
-  if (duty > audio_pwm_out_period)
+  if (audio_pwm_out_noise_shape_enable != 0U)
   {
-    duty = audio_pwm_out_period;
+    int64_t target_q16 = ((int64_t)sample + 32768LL) * (int64_t)pwm_steps;
+    int64_t shaped_q16 = target_q16 + audio_pwm_out_quant_error_q16;
+    int64_t rounded_duty;
+
+    if (shaped_q16 <= 0LL)
+    {
+      duty = 0U;
+      audio_pwm_out_quant_error_q16 = 0;
+    }
+    else
+    {
+      rounded_duty = (shaped_q16 + 32768LL) >> 16;
+      if (rounded_duty > (int64_t)pwm_steps)
+      {
+        /* CCR = ARR + 1 is the valid constant-high endpoint in PWM mode 1. */
+        duty = pwm_steps;
+        audio_pwm_out_quant_error_q16 = 0;
+      }
+      else
+      {
+        duty = (uint32_t)rounded_duty;
+        audio_pwm_out_quant_error_q16 =
+            (int32_t)(shaped_q16 - ((int64_t)duty << 16));
+      }
+    }
+  }
+  else
+  {
+    duty = (uint32_t)((((int64_t)sample + 32768LL) *
+                       (int64_t)pwm_steps) >> 16);
+    if (duty > audio_pwm_out_period)
+    {
+      duty = audio_pwm_out_period;
+    }
+    audio_pwm_out_quant_error_q16 = 0;
   }
   __HAL_TIM_SET_COMPARE(audio_pwm_out_pwm_handle,
                         audio_pwm_out_pwm_channel,
@@ -398,20 +484,26 @@ void AudioPwmOutput_HandleSampleTimer(TIM_HandleTypeDef *htim)
   audio_pwm_out_last_sample_s16 = sample;
   audio_pwm_out_last_duty = duty;
   audio_pwm_out_sample_count++;
-  audio_pwm_out_rate_window_count++;
-  if ((audio_pwm_out_rate_window_count & 0x3FU) == 0U)
-  {
-    uint32_t now_tick = HAL_GetTick();
-    uint32_t elapsed_ms = now_tick - audio_pwm_out_rate_last_tick;
+}
 
-    if (elapsed_ms >= 1000U)
-    {
-      audio_pwm_out_samples_per_sec =
-          (audio_pwm_out_rate_window_count * 1000U) / elapsed_ms;
-      audio_pwm_out_rate_window_count = 0U;
-      audio_pwm_out_rate_last_tick = now_tick;
-    }
+void AudioPwmOutput_UpdateDiagnostics(void)
+{
+  uint32_t now_cycle = DWT->CYCCNT;
+  uint32_t now_sample_count = audio_pwm_out_sample_count;
+  uint32_t elapsed_cycles = now_cycle - audio_pwm_out_rate_last_cycle;
+  uint32_t elapsed_samples = now_sample_count - audio_pwm_out_rate_last_sample_count;
+
+  if ((elapsed_cycles == 0U) || (SystemCoreClock == 0U))
+  {
+    return;
   }
+
+  audio_pwm_out_samples_per_sec =
+      (uint32_t)((((uint64_t)elapsed_samples * SystemCoreClock) +
+                  (elapsed_cycles / 2U)) /
+                 elapsed_cycles);
+  audio_pwm_out_rate_last_cycle = now_cycle;
+  audio_pwm_out_rate_last_sample_count = now_sample_count;
 }
 
 uint8_t AudioPwmOutput_HandleSampleTimerIrq(TIM_HandleTypeDef *htim)
@@ -547,6 +639,37 @@ static int16_t AudioOutput_ConvertMicSample(int32_t sample)
   return AudioOutput_Limit16(scaled_sample);
 }
 
+static void AudioOutput_PushRingSample16(int16_t sample16)
+{
+  uint32_t next_index = audio_out_mic_write_index + 1U;
+  uint32_t magnitude = AudioOutput_Abs16(sample16);
+
+  if (next_index >= AUDIO_OUT_MIC_RING_LEN)
+  {
+    next_index = 0U;
+  }
+
+  if (next_index == audio_out_mic_read_index)
+  {
+    /*
+     * The PWM ISR owns the read index. Drop the newest sample on overflow so
+     * the producer never races the consumer by advancing that index itself.
+     */
+    audio_out_mic_overrun_count++;
+    return;
+  }
+
+  if (magnitude > audio_out_mic_peak)
+  {
+    audio_out_mic_peak = magnitude;
+  }
+
+  audio_out_mic_ring[audio_out_mic_write_index] = sample16;
+  __DMB();
+  audio_out_mic_write_index = next_index;
+  audio_out_mic_push_count++;
+}
+
 static int16_t AudioOutput_ReadMicSample(void)
 {
   int16_t sample;
@@ -585,6 +708,7 @@ static int16_t AudioOutput_ReadMicSample(void)
     return 0;
   }
 
+  __DMB();
   sample = audio_out_mic_ring[audio_out_mic_read_index];
   audio_out_mic_last_sample_s16 = sample;
   audio_out_mic_read_index++;
@@ -612,21 +736,78 @@ static int16_t AudioOutput_NextSample16(void)
       (audio_out_force_test_tone != 0U))
   {
     uint32_t divider = audio_out_test_tone_divider;
+    uint32_t phase_index;
+    uint32_t phase_fraction;
+    uint32_t next_index;
+    int32_t sample0;
+    int32_t sample1;
+    int32_t interpolated_sample;
+
+    /*
+     * Keep the live input queue moving while the generated tone is selected.
+     * Otherwise the queue fills in about 32 ms and every intentional input
+     * discard is incorrectly reported as a real output overrun. Draining also
+     * avoids playing a stale queue when the test tone is switched off.
+     */
+    (void)AudioOutput_ReadMicSample();
+
     if (divider == 0U)
     {
       divider = 1U;
     }
-    sample = (int16_t)(audio_out_sine_lut[audio_out_phase & 31U] / (int16_t)divider);
-    audio_out_phase++;
+    AudioOutput_UpdateTestToneFrequency();
+    phase_index = (audio_out_phase_q16 >> 16) &
+                  (AUDIO_OUT_TEST_TONE_LUT_LEN - 1U);
+    phase_fraction = audio_out_phase_q16 & 0xFFFFU;
+    next_index = (phase_index + 1U) & (AUDIO_OUT_TEST_TONE_LUT_LEN - 1U);
+    sample0 = audio_out_sine_lut[phase_index];
+    sample1 = audio_out_sine_lut[next_index];
+    interpolated_sample = sample0 +
+        (int32_t)(((int64_t)(sample1 - sample0) * phase_fraction) >> 16);
+    sample = (int16_t)(interpolated_sample / (int32_t)divider);
+    audio_out_phase_q16 += audio_out_test_tone_phase_step_q16;
   }
   else if (audio_out_mode == AUDIO_OUTPUT_MODE_MIC_MONITOR)
   {
     sample = AudioOutput_ReadMicSample();
   }
+  else
+  {
+    /* Silence mode discards live input at the normal output rate as well. */
+    (void)AudioOutput_ReadMicSample();
+  }
 
   audio_out_last_sample = (uint16_t)sample;
   audio_out_last_sample_s16 = sample;
   return sample;
+}
+
+static void AudioOutput_UpdateTestToneFrequency(void)
+{
+  uint32_t requested_hz = audio_out_test_tone_frequency_hz;
+  uint32_t applied_hz = requested_hz;
+
+  if (requested_hz == audio_out_test_tone_frequency_cached_hz)
+  {
+    return;
+  }
+
+  if (applied_hz < 1U)
+  {
+    applied_hz = 1U;
+  }
+  if (applied_hz > AUDIO_OUT_TEST_TONE_MAX_HZ)
+  {
+    applied_hz = AUDIO_OUT_TEST_TONE_MAX_HZ;
+  }
+
+  audio_out_test_tone_phase_step_q16 =
+      (uint32_t)((((uint64_t)applied_hz *
+                   AUDIO_OUT_TEST_TONE_LUT_LEN * 65536U) +
+                  (AUDIO_OUT_SAMPLE_RATE_HZ / 2U)) /
+                 AUDIO_OUT_SAMPLE_RATE_HZ);
+  audio_out_test_tone_frequency_applied_hz = applied_hz;
+  audio_out_test_tone_frequency_cached_hz = requested_hz;
 }
 
 static uint32_t AudioOutput_Abs16(int16_t value)

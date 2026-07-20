@@ -14,6 +14,44 @@ extern "C" {
 #define AUDIO_VIS_SPECTRUM_H    92U
 #define AUDIO_VIS_SPECTRUM_BINS 16U
 
+/*
+ * AUTO uses a coherent, one-sample-per-pixel scope for AUX and keeps the
+ * legacy envelope sweep for the I2S microphone.  The explicit modes are
+ * useful from Live Expressions and for A/B testing.
+ */
+#define AUDIO_VIS_SCOPE_MODE_ENVELOPE  0U
+#define AUDIO_VIS_SCOPE_MODE_TRIGGERED 1U
+#define AUDIO_VIS_SCOPE_MODE_AUTO      2U
+
+#define AUDIO_VIS_SCOPE_PLOT_X             1U
+#define AUDIO_VIS_SCOPE_SAMPLE_COUNT       238U
+#define AUDIO_VIS_SCOPE_PRETRIGGER_SAMPLES 32U
+
+typedef struct
+{
+  uint32_t configured_mode;
+  uint32_t effective_mode;
+  uint32_t sample_rate_hz;
+  uint32_t sample_count;
+  uint32_t sample_period_ns;
+  uint32_t window_us;
+  uint32_t pretrigger_samples;
+  uint32_t trigger_hysteresis;
+  uint32_t trigger_count;
+  uint32_t auto_trigger_count;
+  uint32_t stream_reset_count;
+  uint32_t snapshot_sequence;
+  uint32_t drawn_sequence;
+  uint32_t snapshot_ready;
+  uint32_t capture_active;
+  uint32_t trigger_armed;
+  int32_t snapshot_min;
+  int32_t snapshot_max;
+  int32_t snapshot_mean;
+  uint32_t snapshot_peak;
+  uint32_t snapshot_scale;
+} AudioVisualizerScopeDiagnostics;
+
 extern volatile uint8_t audio_vis_frame_ready;
 extern volatile uint32_t audio_vis_update_count;
 extern volatile uint32_t audio_vis_draw_count;
@@ -28,6 +66,7 @@ extern volatile uint32_t audio_vis_draw_stage;
 extern volatile uint32_t audio_vis_draw_error_stage;
 extern volatile uint32_t audio_vis_fft_draw_count;
 extern volatile uint32_t audio_vis_fft_empty_count;
+extern volatile uint32_t audio_vis_fft_axis_change_drawn;
 extern volatile uint16_t audio_vis_fft_debug_bins[AUDIO_VIS_SPECTRUM_BINS];
 extern volatile uint32_t audio_vis_full_clear_count;
 extern volatile uint32_t audio_vis_incremental_draw_count;
@@ -57,6 +96,10 @@ extern volatile uint8_t audio_vis_mode;
 
 void AudioVisualizer_UpdateFromU16(const uint16_t *samples, uint32_t len);
 void AudioVisualizer_UpdateFromS32(const int32_t *samples, uint32_t len);
+void AudioVisualizer_UpdateFromCenteredS32(const int32_t *samples, uint32_t len);
+void AudioVisualizer_SetScopeMode(uint8_t mode);
+void AudioVisualizer_ResetScopeStream(void);
+void AudioVisualizer_GetScopeDiagnostics(AudioVisualizerScopeDiagnostics *diagnostics);
 uint8_t AudioVisualizer_IsFrameReady(void);
 HAL_StatusTypeDef AudioVisualizer_DrawWaveform(ST7789_HandleTypeDef *display);
 

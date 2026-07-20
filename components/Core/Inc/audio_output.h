@@ -24,6 +24,7 @@ extern volatile uint32_t audio_out_i2s_error_code;
 extern volatile uint32_t audio_out_dma_state_before_start;
 extern volatile uint32_t audio_out_dma_state_after_start;
 extern volatile uint32_t audio_out_dma_error_code;
+extern volatile uint32_t audio_out_i2s_runtime_error_count;
 extern volatile uint32_t audio_out_hdmatx_is_null;
 extern volatile uint32_t audio_out_half_count;
 extern volatile uint32_t audio_out_full_count;
@@ -40,6 +41,9 @@ extern volatile int16_t audio_out_tx_debug_samples[16];
 extern volatile uint8_t audio_out_force_test_tone;
 extern volatile uint32_t audio_out_mode_debug;
 extern volatile uint32_t audio_out_test_tone_divider;
+extern volatile uint32_t audio_out_test_tone_frequency_hz;
+extern volatile uint32_t audio_out_test_tone_frequency_applied_hz;
+extern volatile uint32_t audio_out_test_tone_phase_step_q16;
 extern volatile uint32_t audio_out_block_len_debug;
 extern volatile uint32_t audio_out_dma_size_debug;
 extern volatile uint32_t audio_out_mic_push_count;
@@ -72,17 +76,22 @@ extern volatile uint32_t audio_pwm_out_last_peak;
 extern volatile uint32_t audio_pwm_out_level_smooth;
 extern volatile uint32_t audio_pwm_out_clip_count;
 extern volatile int16_t audio_pwm_out_last_sample_s16;
+extern volatile uint32_t audio_pwm_out_noise_shape_enable;
+extern volatile int32_t audio_pwm_out_quant_error_q16;
 extern volatile uint8_t audio_pwm_out_ready;
 
 HAL_StatusTypeDef AudioOutput_Start(I2S_HandleTypeDef *hi2s);
 void AudioOutput_SetMode(AudioOutput_Mode_t mode);
 void AudioOutput_FillBlock(uint16_t *buf, uint32_t len);
 void AudioOutput_PushSamplesS32(const int32_t *samples, uint32_t count);
+void AudioOutput_PushSamplesS16(const int16_t *samples, uint32_t count);
+void AudioOutput_HandleI2sError(I2S_HandleTypeDef *hi2s);
 HAL_StatusTypeDef AudioPwmOutput_Start(TIM_HandleTypeDef *pwm_htim,
                                        uint32_t pwm_channel,
                                        TIM_HandleTypeDef *sample_htim);
 void AudioPwmOutput_HandleSampleTimer(TIM_HandleTypeDef *htim);
 uint8_t AudioPwmOutput_HandleSampleTimerIrq(TIM_HandleTypeDef *htim);
+void AudioPwmOutput_UpdateDiagnostics(void);
 
 #ifdef __cplusplus
 }
