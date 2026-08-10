@@ -22,6 +22,7 @@ volatile uint32_t audio_out_hdmatx_is_null = 1U;
 volatile uint32_t audio_out_half_count = 0U;
 volatile uint32_t audio_out_full_count = 0U;
 volatile uint32_t audio_out_fill_count = 0U;
+volatile uint32_t audio_out_last_callback_tick_ms = 0U;
 volatile uint32_t audio_out_last_sample = 0U;
 volatile int16_t audio_out_last_sample_s16 = 0;
 volatile uint32_t audio_out_tx_peak = 0U;
@@ -159,6 +160,7 @@ HAL_StatusTypeDef AudioOutput_Start(I2S_HandleTypeDef *hi2s)
   audio_out_half_count = 0U;
   audio_out_full_count = 0U;
   audio_out_fill_count = 0U;
+  audio_out_last_callback_tick_ms = HAL_GetTick();
   audio_out_last_sample = 0U;
   audio_out_last_sample_s16 = 0;
   audio_out_tx_peak = 0U;
@@ -530,6 +532,7 @@ void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
 {
   if (AudioOutput_IsActiveI2S(hi2s) != 0U)
   {
+    audio_out_last_callback_tick_ms = HAL_GetTick();
     audio_out_half_count++;
     AudioOutput_FillBlock(&audio_tx_buf[0], audio_out_block_len);
   }
@@ -539,6 +542,7 @@ void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
 {
   if (AudioOutput_IsActiveI2S(hi2s) != 0U)
   {
+    audio_out_last_callback_tick_ms = HAL_GetTick();
     audio_out_full_count++;
     AudioOutput_FillBlock(&audio_tx_buf[audio_out_block_len], audio_out_block_len);
   }

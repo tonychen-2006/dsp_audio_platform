@@ -6,8 +6,8 @@
 #include "audio_visualizer.h"
 #include "arm_math.h"
 
-/* Map the 12-bit ADC range to 87.5% of S16, leaving filter headroom. */
-#define AUX_OUTPUT_DEFAULT_GAIN_Q8 224U
+/* The new buffered AUX front end provides analog headroom; use unity mapping. */
+#define AUX_OUTPUT_DEFAULT_GAIN_Q8 256U
 #define AUX_OUTPUT_DC_TRACK_SHIFT 10U
 #define AUX_OUTPUT_LIMIT_THRESHOLD 28000
 #define AUX_OUTPUT_LIMIT_MAX 32000
@@ -179,9 +179,10 @@ volatile uint32_t aux_output_limiter_count = 0U;
 volatile int32_t aux_output_limiter_last_input = 0;
 volatile int16_t aux_output_limiter_last_output = 0;
 volatile int16_t aux_output_last_sample_s16 = 0;
-volatile uint32_t aux_output_gate_enable = 1U;
-volatile uint32_t aux_output_gate_open = 0U;
-volatile uint32_t aux_output_gate_gain_q8 = 0U;
+/* A clean line-level AUX source should remain continuous at low volume. */
+volatile uint32_t aux_output_gate_enable = 0U;
+volatile uint32_t aux_output_gate_open = 1U;
+volatile uint32_t aux_output_gate_gain_q8 = 256U;
 volatile uint32_t aux_output_gate_detector_avg_s16 = 0U;
 volatile uint32_t aux_output_gate_open_peak_threshold_s16 =
     AUX_OUTPUT_GATE_OPEN_PEAK_S16;
@@ -232,7 +233,7 @@ static volatile uint32_t i2s_mic_analysis_queue_write = 0U;
 static uint32_t aux_sample_index = 0U;
 static int32_t aux_adc_analysis_dc_estimate_q8 = 2048 << 8;
 static int32_t aux_adc_output_dc_estimate_q8 = 2048 << 8;
-static uint32_t aux_output_gate_gain_current_q16 = 0U;
+static uint32_t aux_output_gate_gain_current_q16 = 65536U;
 static arm_biquad_cascade_df2T_instance_f32 aux_output_highpass_filter;
 static arm_biquad_cascade_df2T_instance_f32 aux_output_lowpass_filter;
 static float32_t aux_output_highpass_state[4];
@@ -669,7 +670,16 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
     AuxCapture_QueueAnalysisBlock(&aux_adc_dma_buf[0],
                                   aux_output_s16_buf,
                                   processed_valid);
-    AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[0], 1U);
+    /*
+     * The realtime path above has already conditioned and queued this block
+     * for I2S output.  The deferred two-slot copy is only the legacy fallback;
+     * queueing it as well lets a blocking display draw overwrite diagnostic
+     * staging buffers and report a misleading ADC "overrun".
+     */
+    if (aux_output_realtime_enable == 0U)
+    {
+      AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[0], 1U);
+    }
     if (processed_valid != 0U)
     {
       AuxCapture_RecordOutputCycles(cycle_start);
@@ -692,7 +702,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
         &aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN],
         aux_output_s16_buf,
         processed_valid);
-    AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN], 0U);
+    if (aux_output_realtime_enable == 0U)
+    {
+      AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN], 0U);
+    }
     if (processed_valid != 0U)
     {
       AuxCapture_RecordOutputCycles(cycle_start);
@@ -1394,9 +1407,9 @@ static void AuxCapture_ResetStats(void)
   aux_output_limiter_last_input = 0;
   aux_output_limiter_last_output = 0;
   aux_output_last_sample_s16 = 0;
-  aux_output_gate_enable = 1U;
-  aux_output_gate_open = 0U;
-  aux_output_gate_gain_q8 = 0U;
+  aux_output_gate_enable = 0U;
+  aux_output_gate_open = 1U;
+  aux_output_gate_gain_q8 = 256U;
   aux_output_gate_detector_avg_s16 = 0U;
   aux_output_gate_open_peak_threshold_s16 = AUX_OUTPUT_GATE_OPEN_PEAK_S16;
   aux_output_gate_peak_min_avg_s16 = AUX_OUTPUT_GATE_PEAK_MIN_AVG_S16;
@@ -1407,7 +1420,7 @@ static void AuxCapture_ResetStats(void)
   aux_output_gate_rejected_peak_count = 0U;
   aux_output_gate_open_count = 0U;
   aux_output_gate_close_count = 0U;
-  aux_output_gate_gain_current_q16 = 0U;
+  aux_output_gate_gain_current_q16 = 65536U;
   aux_output_highpass_enable = 1U;
   aux_output_highpass_peak_s16 = 0U;
   aux_output_lowpass_enable = 1U;

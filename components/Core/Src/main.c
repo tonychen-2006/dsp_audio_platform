@@ -269,6 +269,16 @@ typedef struct
   uint32_t tx_half_callbacks_total;
   uint32_t tx_full_callbacks_total;
   uint32_t tx_fill_count_total;
+  uint32_t output_ready;
+  uint32_t digital_transport_active;
+  uint32_t nonzero_audio_active;
+  uint32_t tx_callback_age_ms;
+  uint32_t i2s_i2scfgr;
+  uint32_t i2s_i2spr;
+  uint32_t i2s_cr2;
+  uint32_t i2s_sr;
+  uint32_t dma_cr;
+  uint32_t dma_ndtr;
   uint32_t ring_available_samples;
   uint32_t ring_available_min_samples;
   uint32_t ring_available_max_samples;
@@ -1124,6 +1134,33 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
   audio_debug_i2s.tx_half_callbacks_total = audio_out_half_count;
   audio_debug_i2s.tx_full_callbacks_total = audio_out_full_count;
   audio_debug_i2s.tx_fill_count_total = audio_out_fill_count;
+  audio_debug_i2s.output_ready = audio_out_ready;
+  audio_debug_i2s.tx_callback_age_ms =
+      (tick_ms >= audio_out_last_callback_tick_ms) ?
+      (tick_ms - audio_out_last_callback_tick_ms) : 0U;
+  audio_debug_i2s.i2s_i2scfgr = hi2s3.Instance->I2SCFGR;
+  audio_debug_i2s.i2s_i2spr = hi2s3.Instance->I2SPR;
+  audio_debug_i2s.i2s_cr2 = hi2s3.Instance->CR2;
+  audio_debug_i2s.i2s_sr = hi2s3.Instance->SR;
+  if (hi2s3.hdmatx != NULL)
+  {
+    audio_debug_i2s.dma_cr = hi2s3.hdmatx->Instance->CR;
+    audio_debug_i2s.dma_ndtr = __HAL_DMA_GET_COUNTER(hi2s3.hdmatx);
+  }
+  else
+  {
+    audio_debug_i2s.dma_cr = 0U;
+    audio_debug_i2s.dma_ndtr = 0U;
+  }
+  audio_debug_i2s.digital_transport_active =
+      ((audio_out_ready != 0U) &&
+       ((audio_debug_i2s.i2s_i2scfgr & SPI_I2SCFGR_I2SE) != 0U) &&
+       ((audio_debug_i2s.i2s_cr2 & SPI_CR2_TXDMAEN) != 0U) &&
+       ((audio_debug_i2s.dma_cr & DMA_SxCR_EN) != 0U) &&
+       (audio_debug_i2s.tx_callback_age_ms <= 20U)) ? 1U : 0U;
+  audio_debug_i2s.nonzero_audio_active =
+      ((audio_debug_i2s.digital_transport_active != 0U) &&
+       (audio_out_tx_peak != 0U)) ? 1U : 0U;
   audio_debug_i2s.ring_available_samples = audio_out_mic_available;
   audio_debug_i2s.ring_available_min_samples = audio_out_mic_available_min;
   audio_debug_i2s.ring_available_max_samples = audio_out_mic_available_max;

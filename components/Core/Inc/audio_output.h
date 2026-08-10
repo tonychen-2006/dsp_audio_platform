@@ -29,6 +29,7 @@ extern volatile uint32_t audio_out_hdmatx_is_null;
 extern volatile uint32_t audio_out_half_count;
 extern volatile uint32_t audio_out_full_count;
 extern volatile uint32_t audio_out_fill_count;
+extern volatile uint32_t audio_out_last_callback_tick_ms;
 extern volatile uint32_t audio_out_last_sample;
 extern volatile int16_t audio_out_last_sample_s16;
 extern volatile uint32_t audio_out_tx_peak;

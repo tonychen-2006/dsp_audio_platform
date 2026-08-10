@@ -8,7 +8,7 @@
 #define AUDIO_STREAM_SAMPLE_RATE_HZ 32000U
 
 /* Exposed in audio_debug_config so a screenshot identifies the flashed build. */
-#define AUDIO_FIRMWARE_BUILD_ID 2026071606U
+#define AUDIO_FIRMWARE_BUILD_ID 2026072303U
 
 #if defined(__OPTIMIZE__)
 #define AUDIO_COMPILER_OPTIMIZED 1U
