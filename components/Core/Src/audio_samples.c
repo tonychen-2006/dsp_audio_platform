@@ -249,7 +249,7 @@ static uint8_t AudioSamples_SelectedGateOpen(void)
 {
   if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
   {
-    return (aux_output_gate_open != 0U) ? 1U : 0U;
+    return (aux_output_diag.gate_open != 0U) ? 1U : 0U;
   }
 
   return (i2s_mic_gate_open != 0U) ? 1U : 0U;

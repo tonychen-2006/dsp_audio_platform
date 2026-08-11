@@ -1687,7 +1687,7 @@ static HAL_StatusTypeDef AudioVisualizer_DrawScopeTimebaseLabel(
   {
     if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
     {
-      label = (aux_analysis_last_serviced_tap ==
+      label = (aux_analysis_diag.last_serviced_tap ==
                AUX_ANALYSIS_TAP_RAW_ADC) ? "ADC 7.4MS" : "DSP 7.4MS";
     }
     else

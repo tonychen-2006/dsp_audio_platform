@@ -1,3 +1,8 @@
+/**
+ * @file audio_capture.c
+ * @brief I2S microphone and AUX ADC capture implementation.
+ */
+
 #include "audio_capture.h"
 #include "audio_config.h"
 #include "audio_fft.h"
@@ -6,8 +11,20 @@
 #include "audio_visualizer.h"
 #include "arm_math.h"
 
-/* The new buffered AUX front end provides analog headroom; use unity mapping. */
-#define AUX_OUTPUT_DEFAULT_GAIN_Q8 256U
+/* Shared AUX numeric scales and 12-bit ADC limits. */
+#define AUX_ADC_MAX_CODE 4095U
+#define AUX_ADC_MID_CODE 2048U
+#define AUX_Q8_SCALE 256U
+#define AUX_Q16_UNITY 65536U
+
+/* Exact fixed-point mappings used by the playback and analysis branches. */
+#define AUX_ADC_TO_S16_SCALE 16
+#define AUX_ADC_Q8_TO_S24_SCALE 16
+#define AUX_ADC_TO_S24_SCALE 4096
+#define AUX_S16_TO_S24_SCALE 256
+
+/* The buffered AUX front end provides analog headroom; use unity mapping. */
+#define AUX_OUTPUT_DEFAULT_GAIN_Q8 AUX_Q8_SCALE
 #define AUX_OUTPUT_DC_TRACK_SHIFT 10U
 #define AUX_OUTPUT_LIMIT_THRESHOLD 28000
 #define AUX_OUTPUT_LIMIT_MAX 32000
@@ -49,6 +66,7 @@
 #define AUX_ANALYSIS_QUEUE_BLOCK_COUNT 128U
 #define AUX_ANALYSIS_MAX_BLOCKS_PER_SERVICE 4U
 
+/* Optional I2S microphone input state. */
 uint16_t i2s_rx_buf[I2S_BUF_LEN];
 volatile uint32_t audio_avg = 0U;
 volatile uint32_t audio_min = 0U;
@@ -111,101 +129,42 @@ volatile uint32_t i2s_mic_analysis_source_sequence = 0U;
 volatile uint32_t i2s_mic_analysis_last_serviced_sequence = 0U;
 volatile uint32_t i2s_mic_analysis_discontinuity_count = 0U;
 
-int32_t aux_sample_buf[AUX_CAPTURE_BUF_LEN];
-volatile uint32_t aux_adc_raw = 0U;
-volatile uint32_t aux_adc_avg = 0U;
-volatile uint32_t aux_adc_min = 0U;
-volatile uint32_t aux_adc_max = 0U;
-volatile uint32_t aux_adc_peak = 0U;
-volatile uint32_t aux_adc_clip_active = 0U;
-volatile uint32_t aux_adc_clip_sample_count = 0U;
-volatile uint32_t aux_adc_clip_block_count = 0U;
-volatile uint32_t aux_adc_headroom_codes = 0U;
-volatile uint32_t aux_adc_abs_avg = 0U;
-volatile uint32_t aux_adc_signal_smooth = 0U;
-volatile uint32_t aux_adc_bias_mv = 0U;
-volatile uint32_t aux_adc_vref_mv = 3070U;
-volatile uint32_t aux_adc_sample_count = 0U;
-volatile uint32_t aux_adc_block_count = 0U;
-volatile uint32_t aux_adc_error_count = 0U;
-volatile uint32_t aux_adc_start_status = HAL_ERROR;
-volatile uint32_t aux_adc_timer_start_status = HAL_ERROR;
-volatile uint32_t aux_adc_poll_status = HAL_OK;
-volatile uint32_t aux_adc_dma_mode = 0xFFFFFFFFU;
-volatile uint8_t aux_adc_dma_is_circular = 0U;
-volatile uint32_t aux_adc_hal_state = 0U;
-volatile uint32_t aux_adc_error_code = 0U;
-volatile uint32_t aux_adc_dma_state = 0U;
-volatile uint32_t aux_adc_dma_error_code = 0U;
-volatile uint32_t aux_adc_dma_ndtr = 0U;
-volatile uint32_t aux_adc_timer_counter = 0U;
-volatile uint32_t aux_adc_timer_cr1 = 0U;
-volatile uint32_t aux_adc_timer_sr = 0U;
-volatile uint32_t aux_adc_half_count = 0U;
-volatile uint32_t aux_adc_full_count = 0U;
-volatile uint32_t aux_adc_pending_count = 0U;
-volatile uint32_t aux_adc_service_count = 0U;
-volatile uint32_t aux_adc_overrun_count = 0U;
-volatile uint32_t aux_analysis_queue_count = 0U;
-volatile uint32_t aux_analysis_queue_max = 0U;
-volatile uint32_t aux_analysis_drop_count = 0U;
-volatile uint32_t aux_analysis_service_count = 0U;
-const uint32_t aux_analysis_queue_capacity =
-    AUX_ANALYSIS_QUEUE_BLOCK_COUNT - 1U;
-volatile uint32_t aux_analysis_source_sequence = 0U;
-volatile uint32_t aux_analysis_last_serviced_sequence = 0U;
-volatile uint32_t aux_analysis_discontinuity_count = 0U;
-volatile uint32_t aux_analysis_tap = AUX_ANALYSIS_TAP_RAW_ADC;
-volatile uint32_t aux_analysis_last_serviced_tap = AUX_ANALYSIS_TAP_RAW_ADC;
-volatile uint32_t aux_analysis_raw_origin_adc_q8 = 2048U << 8;
-volatile uint32_t aux_analysis_raw_origin_valid = 0U;
-volatile uint32_t aux_output_realtime_enable = 1U;
-volatile uint32_t aux_output_realtime_push_count = 0U;
-volatile uint32_t aux_output_realtime_peak = 0U;
-volatile uint32_t aux_output_realtime_avg = 0U;
-volatile uint32_t aux_output_realtime_min = 0U;
-volatile uint32_t aux_output_realtime_max = 0U;
-volatile uint32_t aux_output_realtime_abs_avg = 0U;
-volatile uint32_t aux_output_realtime_bias_mv = 0U;
-volatile uint32_t aux_output_process_cycles_last = 0U;
-volatile uint32_t aux_output_process_cycles_max = 0U;
-volatile uint32_t aux_output_process_cycle_budget = 0U;
-volatile uint32_t aux_output_process_deadline_miss_count = 0U;
-volatile uint32_t aux_output_gain_q8 = AUX_OUTPUT_DEFAULT_GAIN_Q8;
-volatile uint32_t aux_output_bias_adc = 2048U;
-volatile uint32_t aux_output_peak_s16 = 0U;
-volatile uint32_t aux_output_abs_avg_s16 = 0U;
-volatile uint32_t aux_output_limiter_count = 0U;
-volatile int32_t aux_output_limiter_last_input = 0;
-volatile int16_t aux_output_limiter_last_output = 0;
-volatile int16_t aux_output_last_sample_s16 = 0;
-/* A clean line-level AUX source should remain continuous at low volume. */
-volatile uint32_t aux_output_gate_enable = 0U;
-volatile uint32_t aux_output_gate_open = 1U;
-volatile uint32_t aux_output_gate_gain_q8 = 256U;
-volatile uint32_t aux_output_gate_detector_avg_s16 = 0U;
-volatile uint32_t aux_output_gate_open_peak_threshold_s16 =
-    AUX_OUTPUT_GATE_OPEN_PEAK_S16;
-volatile uint32_t aux_output_gate_peak_min_avg_s16 =
-    AUX_OUTPUT_GATE_PEAK_MIN_AVG_S16;
-volatile uint32_t aux_output_gate_open_avg_threshold_s16 =
-    AUX_OUTPUT_GATE_OPEN_AVG_S16;
-volatile uint32_t aux_output_gate_close_avg_threshold_s16 =
-    AUX_OUTPUT_GATE_CLOSE_AVG_S16;
-volatile uint32_t aux_output_gate_hold_remaining_samples = 0U;
-volatile uint32_t aux_output_gate_peak_qualified = 0U;
-volatile uint32_t aux_output_gate_rejected_peak_count = 0U;
-volatile uint32_t aux_output_gate_open_count = 0U;
-volatile uint32_t aux_output_gate_close_count = 0U;
-volatile uint32_t aux_output_highpass_enable = 1U;
-const uint32_t aux_output_highpass_cutoff_hz = AUX_OUTPUT_HIGHPASS_CUTOFF_HZ;
-volatile uint32_t aux_output_highpass_peak_s16 = 0U;
-volatile uint32_t aux_output_lowpass_enable = 1U;
-const uint32_t aux_output_lowpass_cutoff_hz = AUX_OUTPUT_LOWPASS_CUTOFF_HZ;
-volatile uint32_t aux_output_lowpass_peak_s16 = 0U;
-volatile uint16_t aux_adc_debug_samples[16];
-volatile uint8_t aux_ready = 0U;
-uint16_t aux_adc_dma_buf[AUX_ADC_DMA_BUF_LEN];
+/* Public AUX state is grouped by subsystem for debugger readability. */
+volatile AuxAdcDiagnostics aux_adc_diag =
+{
+  .start_status = HAL_ERROR,
+  .timer_start_status = HAL_ERROR,
+  .poll_status = HAL_OK,
+  .dma_mode = UINT32_MAX
+};
+volatile AuxAnalysisDiagnostics aux_analysis_diag =
+{
+  .queue_capacity = AUX_ANALYSIS_QUEUE_BLOCK_COUNT - 1U,
+  .tap = AUX_ANALYSIS_TAP_RAW_ADC,
+  .last_serviced_tap = AUX_ANALYSIS_TAP_RAW_ADC,
+  .raw_origin_adc_q8 = AUX_ADC_MID_CODE << 8
+};
+volatile AuxOutputControls aux_output_controls =
+{
+  .realtime_enable = 1U,
+  .gain_q8 = AUX_OUTPUT_DEFAULT_GAIN_Q8,
+  /* A clean line-level source should remain continuous at low volume. */
+  .gate_enable = 0U,
+  .gate_open_peak_threshold_s16 = AUX_OUTPUT_GATE_OPEN_PEAK_S16,
+  .gate_peak_min_avg_s16 = AUX_OUTPUT_GATE_PEAK_MIN_AVG_S16,
+  .gate_open_avg_threshold_s16 = AUX_OUTPUT_GATE_OPEN_AVG_S16,
+  .gate_close_avg_threshold_s16 = AUX_OUTPUT_GATE_CLOSE_AVG_S16,
+  .highpass_enable = 1U,
+  .lowpass_enable = 1U
+};
+volatile AuxOutputDiagnostics aux_output_diag =
+{
+  .bias_adc = AUX_ADC_MID_CODE,
+  .gate_open = 1U,
+  .gate_gain_q8 = AUX_Q8_SCALE,
+  .highpass_cutoff_hz = AUX_OUTPUT_HIGHPASS_CUTOFF_HZ,
+  .lowpass_cutoff_hz = AUX_OUTPUT_LOWPASS_CUTOFF_HZ
+};
 
 static I2S_HandleTypeDef *audio_i2s_handle = NULL;
 static ADC_HandleTypeDef *aux_adc_handle = NULL;
@@ -230,32 +189,43 @@ static uint32_t i2s_mic_analysis_queue_sequence[
     I2S_MIC_ANALYSIS_QUEUE_BLOCK_COUNT];
 static volatile uint32_t i2s_mic_analysis_queue_read = 0U;
 static volatile uint32_t i2s_mic_analysis_queue_write = 0U;
-static uint32_t aux_sample_index = 0U;
-static int32_t aux_adc_analysis_dc_estimate_q8 = 2048 << 8;
-static int32_t aux_adc_output_dc_estimate_q8 = 2048 << 8;
-static uint32_t aux_output_gate_gain_current_q16 = 65536U;
+
+/* Realtime AUX path: ADC DMA -> conditioning -> S16 output ring. */
+static uint16_t aux_adc_dma_buf[AUX_ADC_DMA_BUF_LEN];
+static int32_t aux_adc_output_dc_estimate_q8 = AUX_ADC_MID_CODE << 8;
+static uint32_t aux_output_gate_gain_current_q16 = AUX_Q16_UNITY;
 static arm_biquad_cascade_df2T_instance_f32 aux_output_highpass_filter;
 static arm_biquad_cascade_df2T_instance_f32 aux_output_lowpass_filter;
 static float32_t aux_output_highpass_state[4];
 static float32_t aux_output_lowpass_state[4];
 static float32_t aux_output_filter_buf[AUX_CAPTURE_BUF_LEN];
-static uint16_t aux_adc_raw_buf[AUX_CAPTURE_BUF_LEN];
 static int16_t aux_output_s16_buf[AUX_CAPTURE_BUF_LEN];
-static uint16_t aux_adc_pending_half_buf[AUX_CAPTURE_BUF_LEN];
-static uint16_t aux_adc_pending_full_buf[AUX_CAPTURE_BUF_LEN];
-static uint16_t aux_adc_service_buf[AUX_CAPTURE_BUF_LEN];
-static int16_t aux_output_service_buf[AUX_CAPTURE_BUF_LEN];
+
+/*
+ * Deferred AUX path: queued raw/S16 blocks -> S24 analysis consumers.
+ * RAW_ADC entries hold 0..4095 codes; POST_DSP entries hold signed S16.
+ */
+static int32_t aux_adc_analysis_dc_estimate_q8 = AUX_ADC_MID_CODE << 8;
+static int16_t aux_analysis_service_buf[AUX_CAPTURE_BUF_LEN];
 static int32_t aux_analysis_s32_buf[AUX_CAPTURE_BUF_LEN];
-/* RAW_ADC stores exact positive 0..4095 codes; POST_DSP stores signed S16. */
-static int16_t aux_analysis_queue[AUX_ANALYSIS_QUEUE_BLOCK_COUNT][AUX_CAPTURE_BUF_LEN];
+static int16_t aux_analysis_queue[AUX_ANALYSIS_QUEUE_BLOCK_COUNT]
+                                 [AUX_CAPTURE_BUF_LEN];
 static uint32_t aux_analysis_queue_sequence[AUX_ANALYSIS_QUEUE_BLOCK_COUNT];
 static uint8_t aux_analysis_queue_tap[AUX_ANALYSIS_QUEUE_BLOCK_COUNT];
-static volatile uint8_t aux_adc_half_pending = 0U;
-static volatile uint8_t aux_adc_full_pending = 0U;
-static volatile uint32_t aux_adc_half_sequence = 0U;
-static volatile uint32_t aux_adc_full_sequence = 0U;
 static volatile uint32_t aux_analysis_queue_read = 0U;
 static volatile uint32_t aux_analysis_queue_write = 0U;
+
+/* Polled/legacy fallback staging, inactive during realtime reconstruction. */
+static uint32_t aux_poll_sample_index = 0U;
+static uint16_t aux_poll_raw_buf[AUX_CAPTURE_BUF_LEN];
+static int32_t aux_legacy_s32_buf[AUX_CAPTURE_BUF_LEN];
+static uint16_t aux_legacy_pending_half_buf[AUX_CAPTURE_BUF_LEN];
+static uint16_t aux_legacy_pending_full_buf[AUX_CAPTURE_BUF_LEN];
+static uint16_t aux_legacy_adc_service_buf[AUX_CAPTURE_BUF_LEN];
+static volatile uint8_t aux_legacy_half_pending = 0U;
+static volatile uint8_t aux_legacy_full_pending = 0U;
+static volatile uint32_t aux_legacy_half_sequence = 0U;
+static volatile uint32_t aux_legacy_full_sequence = 0U;
 
 /*
  * CMSIS-DSP DF2T coefficients use {b0, b1, b2, -a1, -a2}.
@@ -291,15 +261,26 @@ static void I2sMic_RecordProcessCycles(uint32_t cycle_start,
                                        uint32_t sample_count);
 static uint8_t AuxCapture_IsActiveAdc(ADC_HandleTypeDef *hadc);
 static void AuxCapture_ResetStats(void);
-static void AuxCapture_QueueDmaBlock(const uint16_t *raw_buf, uint8_t half_block);
+static void AuxCapture_HandleDmaBlock(const uint16_t *raw_buf,
+                                      uint8_t half_block);
+static void AuxCapture_ServiceLegacy(void);
+static void AuxCapture_QueueLegacyBlock(const uint16_t *raw_buf,
+                                        uint8_t half_block);
 static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
                                           const int16_t *processed_buf,
                                           uint8_t processed_valid);
 static void AuxCapture_ServiceAnalysis(void);
-static void AuxCapture_RecordOutputCycles(uint32_t cycle_start);
+static void AuxCapture_RecordRealtimeCycles(uint32_t cycle_start);
 static int16_t AuxCapture_LimitOutput16(int32_t value);
-static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t len);
-static void AuxCapture_ProcessRawBlock(const uint16_t *raw_buf, uint32_t len);
+static void AuxCapture_ApplyGate(uint32_t len,
+                                 uint32_t input_peak,
+                                 uint32_t input_abs_sum,
+                                 uint32_t *output_peak,
+                                 uint32_t *output_abs_sum);
+static uint8_t AuxCapture_ProcessRealtimeBlock(const uint16_t *raw_buf,
+                                               uint32_t len);
+static void AuxCapture_ProcessLegacyBlock(const uint16_t *raw_buf,
+                                          uint32_t len);
 
 HAL_StatusTypeDef AudioCapture_Start(I2S_HandleTypeDef *hi2s)
 {
@@ -437,14 +418,14 @@ HAL_StatusTypeDef AuxCapture_Start(ADC_HandleTypeDef *hadc)
 {
   if (hadc == NULL)
   {
-    aux_adc_start_status = HAL_ERROR;
+    aux_adc_diag.start_status = HAL_ERROR;
     return HAL_ERROR;
   }
 
   aux_adc_handle = hadc;
   aux_timer_handle = NULL;
   AuxCapture_ResetStats();
-  aux_adc_start_status = HAL_OK;
+  aux_adc_diag.start_status = HAL_OK;
 
   return HAL_OK;
 }
@@ -455,7 +436,7 @@ HAL_StatusTypeDef AuxCapture_StartDma(ADC_HandleTypeDef *hadc, TIM_HandleTypeDef
 
   if ((hadc == NULL) || (htim == NULL))
   {
-    aux_adc_start_status = HAL_ERROR;
+    aux_adc_diag.start_status = HAL_ERROR;
     return HAL_ERROR;
   }
 
@@ -465,32 +446,32 @@ HAL_StatusTypeDef AuxCapture_StartDma(ADC_HandleTypeDef *hadc, TIM_HandleTypeDef
 
   if (hadc->DMA_Handle == NULL)
   {
-    aux_adc_dma_mode = 0xFFFFFFFFU;
-    aux_adc_dma_is_circular = 0U;
-    aux_adc_start_status = HAL_ERROR;
+    aux_adc_diag.dma_mode = 0xFFFFFFFFU;
+    aux_adc_diag.dma_is_circular = 0U;
+    aux_adc_diag.start_status = HAL_ERROR;
     return HAL_ERROR;
   }
 
-  aux_adc_dma_mode = hadc->DMA_Handle->Init.Mode;
-  aux_adc_dma_is_circular = (hadc->DMA_Handle->Init.Mode == DMA_CIRCULAR) ? 1U : 0U;
+  aux_adc_diag.dma_mode = hadc->DMA_Handle->Init.Mode;
+  aux_adc_diag.dma_is_circular = (hadc->DMA_Handle->Init.Mode == DMA_CIRCULAR) ? 1U : 0U;
 
   /*
    * Start ADC DMA first. TIM2 then provides the fixed audio sample clock
    * through TRGO, so the ADC begins converting on timer update events.
    */
   status = HAL_ADC_Start_DMA(hadc, (uint32_t *)aux_adc_dma_buf, AUX_ADC_DMA_BUF_LEN);
-  aux_adc_start_status = status;
+  aux_adc_diag.start_status = status;
   if (status != HAL_OK)
   {
-    aux_adc_error_count++;
+    aux_adc_diag.error_count++;
     return status;
   }
 
   status = HAL_TIM_Base_Start(htim);
-  aux_adc_timer_start_status = status;
+  aux_adc_diag.timer_start_status = status;
   if (status != HAL_OK)
   {
-    aux_adc_error_count++;
+    aux_adc_diag.error_count++;
   }
 
   AuxCapture_UpdateDiagnostics();
@@ -511,16 +492,16 @@ void AuxCapture_Poll(void)
   status = HAL_ADC_Start(aux_adc_handle);
   if (status != HAL_OK)
   {
-    aux_adc_poll_status = status;
-    aux_adc_error_count++;
+    aux_adc_diag.poll_status = status;
+    aux_adc_diag.error_count++;
     return;
   }
 
   status = HAL_ADC_PollForConversion(aux_adc_handle, 1U);
   if (status != HAL_OK)
   {
-    aux_adc_poll_status = status;
-    aux_adc_error_count++;
+    aux_adc_diag.poll_status = status;
+    aux_adc_diag.error_count++;
     (void)HAL_ADC_Stop(aux_adc_handle);
     return;
   }
@@ -528,103 +509,34 @@ void AuxCapture_Poll(void)
   raw = HAL_ADC_GetValue(aux_adc_handle);
   (void)HAL_ADC_Stop(aux_adc_handle);
 
-  if (raw > 4095U)
+  if (raw > AUX_ADC_MAX_CODE)
   {
-    raw = 4095U;
+    raw = AUX_ADC_MAX_CODE;
   }
 
-  aux_adc_raw = raw;
-  aux_adc_poll_status = HAL_OK;
+  aux_adc_diag.raw = raw;
+  aux_adc_diag.poll_status = HAL_OK;
 
-  if (aux_sample_index < 16U)
+  aux_poll_raw_buf[aux_poll_sample_index] = (uint16_t)raw;
+
+  aux_poll_sample_index++;
+
+  if (aux_poll_sample_index >= AUX_CAPTURE_BUF_LEN)
   {
-    aux_adc_debug_samples[aux_sample_index] = (uint16_t)raw;
-  }
-  aux_adc_raw_buf[aux_sample_index] = (uint16_t)raw;
-
-  aux_sample_index++;
-
-  if (aux_sample_index >= AUX_CAPTURE_BUF_LEN)
-  {
-    AuxCapture_ProcessRawBlock(aux_adc_raw_buf, AUX_CAPTURE_BUF_LEN);
-    aux_sample_index = 0U;
+    AuxCapture_ProcessLegacyBlock(aux_poll_raw_buf, AUX_CAPTURE_BUF_LEN);
+    aux_poll_sample_index = 0U;
   }
 }
 
 void AuxCapture_Service(void)
 {
-  uint8_t process_half = 0U;
-  uint8_t process_full = 0U;
-  uint32_t primask;
-  uint32_t half_sequence = 0U;
-  uint32_t full_sequence = 0U;
-
-  primask = __get_PRIMASK();
-  __disable_irq();
-  if (aux_adc_half_pending != 0U)
+  if ((aux_legacy_half_pending != 0U) ||
+      (aux_legacy_full_pending != 0U))
   {
-    aux_adc_half_pending = 0U;
-    aux_adc_pending_count = (uint32_t)aux_adc_full_pending;
-    half_sequence = aux_adc_half_sequence;
-    process_half = 1U;
-  }
-  if (primask == 0U)
-  {
-    __enable_irq();
+    AuxCapture_ServiceLegacy();
   }
 
-  if (process_half != 0U)
-  {
-    for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
-    {
-      aux_adc_service_buf[i] = aux_adc_pending_half_buf[i];
-    }
-    __DMB();
-    if ((half_sequence == aux_adc_half_sequence) &&
-        ((half_sequence & 1U) == 0U))
-    {
-      AuxCapture_ProcessRawBlock(aux_adc_service_buf, AUX_CAPTURE_BUF_LEN);
-      aux_adc_service_count++;
-    }
-    else
-    {
-      aux_adc_overrun_count++;
-    }
-  }
-
-  primask = __get_PRIMASK();
-  __disable_irq();
-  if (aux_adc_full_pending != 0U)
-  {
-    aux_adc_full_pending = 0U;
-    aux_adc_pending_count = (uint32_t)aux_adc_half_pending;
-    full_sequence = aux_adc_full_sequence;
-    process_full = 1U;
-  }
-  if (primask == 0U)
-  {
-    __enable_irq();
-  }
-
-  if (process_full != 0U)
-  {
-    for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
-    {
-      aux_adc_service_buf[i] = aux_adc_pending_full_buf[i];
-    }
-    __DMB();
-    if ((full_sequence == aux_adc_full_sequence) &&
-        ((full_sequence & 1U) == 0U))
-    {
-      AuxCapture_ProcessRawBlock(aux_adc_service_buf, AUX_CAPTURE_BUF_LEN);
-      aux_adc_service_count++;
-    }
-    else
-    {
-      aux_adc_overrun_count++;
-    }
-  }
-
+  /* The normal DMA path always drains its deferred analysis queue here. */
   AuxCapture_ServiceAnalysis();
 }
 
@@ -632,84 +544,58 @@ void AuxCapture_UpdateDiagnostics(void)
 {
   if (aux_adc_handle != NULL)
   {
-    aux_adc_hal_state = aux_adc_handle->State;
-    aux_adc_error_code = aux_adc_handle->ErrorCode;
+    aux_adc_diag.hal_state = aux_adc_handle->State;
+    aux_adc_diag.error_code = aux_adc_handle->ErrorCode;
 
     if (aux_adc_handle->DMA_Handle != NULL)
     {
-      aux_adc_dma_state = aux_adc_handle->DMA_Handle->State;
-      aux_adc_dma_error_code = aux_adc_handle->DMA_Handle->ErrorCode;
-      aux_adc_dma_ndtr = __HAL_DMA_GET_COUNTER(aux_adc_handle->DMA_Handle);
+      aux_adc_diag.dma_state = aux_adc_handle->DMA_Handle->State;
+      aux_adc_diag.dma_error_code = aux_adc_handle->DMA_Handle->ErrorCode;
+      aux_adc_diag.dma_ndtr = __HAL_DMA_GET_COUNTER(aux_adc_handle->DMA_Handle);
     }
     else
     {
-      aux_adc_dma_state = 0xFFFFFFFFU;
-      aux_adc_dma_error_code = 0xFFFFFFFFU;
-      aux_adc_dma_ndtr = 0xFFFFFFFFU;
+      aux_adc_diag.dma_state = 0xFFFFFFFFU;
+      aux_adc_diag.dma_error_code = 0xFFFFFFFFU;
+      aux_adc_diag.dma_ndtr = 0xFFFFFFFFU;
     }
   }
 
   if (aux_timer_handle != NULL)
   {
-    aux_adc_timer_counter = __HAL_TIM_GET_COUNTER(aux_timer_handle);
-    aux_adc_timer_cr1 = aux_timer_handle->Instance->CR1;
-    aux_adc_timer_sr = aux_timer_handle->Instance->SR;
+    aux_adc_diag.timer_counter = __HAL_TIM_GET_COUNTER(aux_timer_handle);
+    aux_adc_diag.timer_cr1 = aux_timer_handle->Instance->CR1;
+    aux_adc_diag.timer_sr = aux_timer_handle->Instance->SR;
   }
 }
 
+/**
+ * @brief Handle completion of the first AUX ADC DMA half.
+ *
+ * The callback performs bounded speaker conditioning and queues one analysis
+ * block. FFT, measurement, and display work run later in AuxCapture_Service().
+ *
+ * @param hadc ADC handle supplied by the HAL callback.
+ */
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (AuxCapture_IsActiveAdc(hadc) != 0U)
   {
-    uint8_t processed_valid;
-    uint32_t cycle_start = DWT->CYCCNT;
-
-    aux_adc_half_count++;
-    processed_valid =
-        AuxCapture_PushOutputRawBlock(&aux_adc_dma_buf[0], AUX_CAPTURE_BUF_LEN);
-    AuxCapture_QueueAnalysisBlock(&aux_adc_dma_buf[0],
-                                  aux_output_s16_buf,
-                                  processed_valid);
-    /*
-     * The realtime path above has already conditioned and queued this block
-     * for I2S output.  The deferred two-slot copy is only the legacy fallback;
-     * queueing it as well lets a blocking display draw overwrite diagnostic
-     * staging buffers and report a misleading ADC "overrun".
-     */
-    if (aux_output_realtime_enable == 0U)
-    {
-      AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[0], 1U);
-    }
-    if (processed_valid != 0U)
-    {
-      AuxCapture_RecordOutputCycles(cycle_start);
-    }
+    aux_adc_diag.half_count++;
+    AuxCapture_HandleDmaBlock(&aux_adc_dma_buf[0], 1U);
   }
 }
 
+/**
+ * @brief Handle completion of the second AUX ADC DMA half.
+ * @param hadc ADC handle supplied by the HAL callback.
+ */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (AuxCapture_IsActiveAdc(hadc) != 0U)
   {
-    uint8_t processed_valid;
-    uint32_t cycle_start = DWT->CYCCNT;
-
-    aux_adc_full_count++;
-    processed_valid =
-        AuxCapture_PushOutputRawBlock(&aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN],
-                                      AUX_CAPTURE_BUF_LEN);
-    AuxCapture_QueueAnalysisBlock(
-        &aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN],
-        aux_output_s16_buf,
-        processed_valid);
-    if (aux_output_realtime_enable == 0U)
-    {
-      AuxCapture_QueueDmaBlock(&aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN], 0U);
-    }
-    if (processed_valid != 0U)
-    {
-      AuxCapture_RecordOutputCycles(cycle_start);
-    }
+    aux_adc_diag.full_count++;
+    AuxCapture_HandleDmaBlock(&aux_adc_dma_buf[AUX_CAPTURE_BUF_LEN], 0U);
   }
 }
 
@@ -1311,6 +1197,11 @@ static void I2sMic_RecordProcessCycles(uint32_t cycle_start,
   }
 }
 
+/**
+ * @brief Check whether an ADC callback belongs to the active AUX capture.
+ * @param hadc ADC handle supplied by the HAL callback.
+ * @return 1 when @p hadc is the active AUX ADC; otherwise 0.
+ */
 static uint8_t AuxCapture_IsActiveAdc(ADC_HandleTypeDef *hadc)
 {
   if ((hadc == NULL) || (aux_adc_handle == NULL))
@@ -1321,12 +1212,18 @@ static uint8_t AuxCapture_IsActiveAdc(ADC_HandleTypeDef *hadc)
   return (hadc->Instance == aux_adc_handle->Instance) ? 1U : 0U;
 }
 
+/**
+ * @brief Reset AUX stream ownership, filters, controls, and diagnostics.
+ */
 static void AuxCapture_ResetStats(void)
 {
+  uint32_t realtime_enable = aux_output_controls.realtime_enable;
+
+  /* Reset stream-dependent DSP state before capture begins. */
   AudioSamples_ResetNoiseMetrics();
-  aux_sample_index = 0U;
-  aux_adc_analysis_dc_estimate_q8 = 2048 << 8;
-  aux_adc_output_dc_estimate_q8 = 2048 << 8;
+  aux_poll_sample_index = 0U;
+  aux_adc_analysis_dc_estimate_q8 = AUX_ADC_MID_CODE << 8;
+  aux_adc_output_dc_estimate_q8 = AUX_ADC_MID_CODE << 8;
   arm_biquad_cascade_df2T_init_f32(&aux_output_highpass_filter,
                                     2U,
                                     aux_output_highpass_coeffs,
@@ -1335,133 +1232,187 @@ static void AuxCapture_ResetStats(void)
                                     2U,
                                     aux_output_lowpass_coeffs,
                                     aux_output_lowpass_state);
-  aux_ready = 0U;
-  aux_adc_raw = 0U;
-  aux_adc_avg = 0U;
-  aux_adc_min = 0U;
-  aux_adc_max = 0U;
-  aux_adc_peak = 0U;
-  aux_adc_clip_active = 0U;
-  aux_adc_clip_sample_count = 0U;
-  aux_adc_clip_block_count = 0U;
-  aux_adc_headroom_codes = 0U;
-  aux_adc_abs_avg = 0U;
-  aux_adc_signal_smooth = 0U;
-  aux_adc_bias_mv = 0U;
-  aux_adc_vref_mv = 3070U;
-  aux_adc_sample_count = 0U;
-  aux_adc_block_count = 0U;
-  aux_adc_error_count = 0U;
-  aux_adc_poll_status = HAL_OK;
-  aux_adc_timer_start_status = HAL_ERROR;
-  aux_adc_hal_state = 0U;
-  aux_adc_error_code = 0U;
-  aux_adc_dma_state = 0U;
-  aux_adc_dma_error_code = 0U;
-  aux_adc_dma_ndtr = 0U;
-  aux_adc_timer_counter = 0U;
-  aux_adc_timer_cr1 = 0U;
-  aux_adc_timer_sr = 0U;
-  aux_adc_half_count = 0U;
-  aux_adc_full_count = 0U;
-  aux_adc_pending_count = 0U;
-  aux_adc_service_count = 0U;
-  aux_adc_overrun_count = 0U;
-  aux_analysis_queue_count = 0U;
-  aux_analysis_queue_max = 0U;
-  aux_analysis_drop_count = 0U;
-  aux_analysis_service_count = 0U;
-  aux_analysis_source_sequence = 0U;
-  aux_analysis_last_serviced_sequence = 0U;
-  aux_analysis_discontinuity_count = 0U;
-  aux_analysis_tap = AUX_ANALYSIS_TAP_RAW_ADC;
-  aux_analysis_last_serviced_tap = AUX_ANALYSIS_TAP_RAW_ADC;
-  aux_analysis_raw_origin_adc_q8 = 2048U << 8;
-  aux_analysis_raw_origin_valid = 0U;
+
+  /* Unspecified members in these global-state structs reset to zero. */
+  aux_adc_diag = (AuxAdcDiagnostics)
+  {
+    .start_status = HAL_ERROR,
+    .timer_start_status = HAL_ERROR,
+    .poll_status = HAL_OK,
+    .dma_mode = UINT32_MAX
+  };
+  aux_analysis_diag = (AuxAnalysisDiagnostics)
+  {
+    .queue_capacity = AUX_ANALYSIS_QUEUE_BLOCK_COUNT - 1U,
+    .tap = AUX_ANALYSIS_TAP_RAW_ADC,
+    .last_serviced_tap = AUX_ANALYSIS_TAP_RAW_ADC,
+    .raw_origin_adc_q8 = AUX_ADC_MID_CODE << 8
+  };
   aux_analysis_queue_read = 0U;
   aux_analysis_queue_write = 0U;
-  aux_output_realtime_push_count = 0U;
-  aux_output_realtime_peak = 0U;
-  aux_output_realtime_avg = 0U;
-  aux_output_realtime_min = 0U;
-  aux_output_realtime_max = 0U;
-  aux_output_realtime_abs_avg = 0U;
-  aux_output_realtime_bias_mv = 0U;
+
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
   {
     DWT->CYCCNT = 0U;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   }
-  aux_output_process_cycles_last = 0U;
-  aux_output_process_cycles_max = 0U;
-  aux_output_process_cycle_budget = (uint32_t)(
-      ((uint64_t)SystemCoreClock * AUX_CAPTURE_BUF_LEN) /
-      AUDIO_STREAM_SAMPLE_RATE_HZ);
-  aux_output_process_deadline_miss_count = 0U;
-  aux_output_gain_q8 = AUX_OUTPUT_DEFAULT_GAIN_Q8;
-  aux_output_bias_adc = 2048U;
-  aux_output_peak_s16 = 0U;
-  aux_output_abs_avg_s16 = 0U;
-  aux_output_limiter_count = 0U;
-  aux_output_limiter_last_input = 0;
-  aux_output_limiter_last_output = 0;
-  aux_output_last_sample_s16 = 0;
-  aux_output_gate_enable = 0U;
-  aux_output_gate_open = 1U;
-  aux_output_gate_gain_q8 = 256U;
-  aux_output_gate_detector_avg_s16 = 0U;
-  aux_output_gate_open_peak_threshold_s16 = AUX_OUTPUT_GATE_OPEN_PEAK_S16;
-  aux_output_gate_peak_min_avg_s16 = AUX_OUTPUT_GATE_PEAK_MIN_AVG_S16;
-  aux_output_gate_open_avg_threshold_s16 = AUX_OUTPUT_GATE_OPEN_AVG_S16;
-  aux_output_gate_close_avg_threshold_s16 = AUX_OUTPUT_GATE_CLOSE_AVG_S16;
-  aux_output_gate_hold_remaining_samples = 0U;
-  aux_output_gate_peak_qualified = 0U;
-  aux_output_gate_rejected_peak_count = 0U;
-  aux_output_gate_open_count = 0U;
-  aux_output_gate_close_count = 0U;
-  aux_output_gate_gain_current_q16 = 65536U;
-  aux_output_highpass_enable = 1U;
-  aux_output_highpass_peak_s16 = 0U;
-  aux_output_lowpass_enable = 1U;
-  aux_output_lowpass_peak_s16 = 0U;
-  aux_adc_half_pending = 0U;
-  aux_adc_full_pending = 0U;
-  aux_adc_half_sequence = 0U;
-  aux_adc_full_sequence = 0U;
 
-  for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
+  /* Preserve the selected capture mode; reset every other output control. */
+  aux_output_controls = (AuxOutputControls)
   {
-    aux_sample_buf[i] = 0;
-    aux_output_s16_buf[i] = 0;
-    aux_output_filter_buf[i] = 0.0f;
-    aux_adc_raw_buf[i] = 2048U;
-    aux_adc_pending_half_buf[i] = 2048U;
-    aux_adc_pending_full_buf[i] = 2048U;
-    aux_adc_service_buf[i] = 2048U;
-    aux_output_service_buf[i] = 0;
-    aux_analysis_s32_buf[i] = 0;
+    .realtime_enable = realtime_enable,
+    .gain_q8 = AUX_OUTPUT_DEFAULT_GAIN_Q8,
+    .gate_enable = 0U,
+    .gate_open_peak_threshold_s16 = AUX_OUTPUT_GATE_OPEN_PEAK_S16,
+    .gate_peak_min_avg_s16 = AUX_OUTPUT_GATE_PEAK_MIN_AVG_S16,
+    .gate_open_avg_threshold_s16 = AUX_OUTPUT_GATE_OPEN_AVG_S16,
+    .gate_close_avg_threshold_s16 = AUX_OUTPUT_GATE_CLOSE_AVG_S16,
+    .highpass_enable = 1U,
+    .lowpass_enable = 1U
+  };
+  aux_output_diag = (AuxOutputDiagnostics)
+  {
+    .process_cycle_budget = (uint32_t)(
+        ((uint64_t)SystemCoreClock * AUX_CAPTURE_BUF_LEN) /
+        AUDIO_STREAM_SAMPLE_RATE_HZ),
+    .bias_adc = AUX_ADC_MID_CODE,
+    .gate_open = 1U,
+    .gate_gain_q8 = AUX_Q8_SCALE,
+    .highpass_cutoff_hz = AUX_OUTPUT_HIGHPASS_CUTOFF_HZ,
+    .lowpass_cutoff_hz = AUX_OUTPUT_LOWPASS_CUTOFF_HZ
+  };
+  aux_output_gate_gain_current_q16 = AUX_Q16_UNITY;
+  aux_legacy_half_pending = 0U;
+  aux_legacy_full_pending = 0U;
+  aux_legacy_half_sequence = 0U;
+  aux_legacy_full_sequence = 0U;
+
+  /*
+   * Payload buffers are fully overwritten before a flag or queue index makes
+   * them readable. Resetting the ownership state above therefore makes stale
+   * payloads unreachable and avoids a large startup-only memory clear.
+   */
+}
+
+/**
+ * @brief Drain the two-slot handoff used by legacy reconstruction.
+ */
+static void AuxCapture_ServiceLegacy(void)
+{
+  uint8_t process_half = 0U;
+  uint8_t process_full = 0U;
+  uint32_t primask;
+  uint32_t half_sequence = 0U;
+  uint32_t full_sequence = 0U;
+
+  primask = __get_PRIMASK();
+  __disable_irq();
+  if (aux_legacy_half_pending != 0U)
+  {
+    aux_legacy_half_pending = 0U;
+    aux_adc_diag.pending_count = (uint32_t)aux_legacy_full_pending;
+    half_sequence = aux_legacy_half_sequence;
+    process_half = 1U;
   }
-  for (uint32_t block = 0U; block < AUX_ANALYSIS_QUEUE_BLOCK_COUNT; block++)
+  if (primask == 0U)
   {
-    aux_analysis_queue_sequence[block] = 0U;
-    aux_analysis_queue_tap[block] = AUX_ANALYSIS_TAP_RAW_ADC;
+    __enable_irq();
+  }
+
+  if (process_half != 0U)
+  {
     for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
     {
-      aux_analysis_queue[block][i] = 0;
+      aux_legacy_adc_service_buf[i] = aux_legacy_pending_half_buf[i];
+    }
+    __DMB();
+    if ((half_sequence == aux_legacy_half_sequence) &&
+        ((half_sequence & 1U) == 0U))
+    {
+      AuxCapture_ProcessLegacyBlock(aux_legacy_adc_service_buf,
+                                    AUX_CAPTURE_BUF_LEN);
+      aux_adc_diag.service_count++;
+    }
+    else
+    {
+      aux_adc_diag.overrun_count++;
     }
   }
-  for (uint32_t i = 0U; i < AUX_ADC_DMA_BUF_LEN; i++)
+
+  primask = __get_PRIMASK();
+  __disable_irq();
+  if (aux_legacy_full_pending != 0U)
   {
-    aux_adc_dma_buf[i] = 2048U;
+    aux_legacy_full_pending = 0U;
+    aux_adc_diag.pending_count = (uint32_t)aux_legacy_half_pending;
+    full_sequence = aux_legacy_full_sequence;
+    process_full = 1U;
   }
-  for (uint32_t i = 0U; i < 16U; i++)
+  if (primask == 0U)
   {
-    aux_adc_debug_samples[i] = 2048U;
+    __enable_irq();
+  }
+
+  if (process_full != 0U)
+  {
+    for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
+    {
+      aux_legacy_adc_service_buf[i] = aux_legacy_pending_full_buf[i];
+    }
+    __DMB();
+    if ((full_sequence == aux_legacy_full_sequence) &&
+        ((full_sequence & 1U) == 0U))
+    {
+      AuxCapture_ProcessLegacyBlock(aux_legacy_adc_service_buf,
+                                    AUX_CAPTURE_BUF_LEN);
+      aux_adc_diag.service_count++;
+    }
+    else
+    {
+      aux_adc_diag.overrun_count++;
+    }
   }
 }
 
-static void AuxCapture_QueueDmaBlock(const uint16_t *raw_buf, uint8_t half_block)
+/**
+ * @brief Process one completed AUX DMA half inside the ADC callback.
+ *
+ * Speaker samples are reconstructed immediately. The selected analysis tap is
+ * copied into a queue for lower-priority foreground processing.
+ *
+ * @param raw_buf Completed block of raw ADC codes.
+ * @param half_block Nonzero for the first DMA half; zero for the second.
+ */
+static void AuxCapture_HandleDmaBlock(const uint16_t *raw_buf,
+                                      uint8_t half_block)
+{
+  uint32_t cycle_start = DWT->CYCCNT;
+  uint8_t processed_valid =
+      AuxCapture_ProcessRealtimeBlock(raw_buf, AUX_CAPTURE_BUF_LEN);
+
+  AuxCapture_QueueAnalysisBlock(raw_buf,
+                                aux_output_s16_buf,
+                                processed_valid);
+
+  /* The two-slot copy is needed only when realtime reconstruction is off. */
+  if (aux_output_controls.realtime_enable == 0U)
+  {
+    AuxCapture_QueueLegacyBlock(raw_buf, half_block);
+  }
+  if (processed_valid != 0U)
+  {
+    AuxCapture_RecordRealtimeCycles(cycle_start);
+  }
+}
+
+/**
+ * @brief Copy one DMA half into the legacy main-loop staging area.
+ * @param raw_buf Completed block of raw ADC codes.
+ * @param half_block Nonzero to use the first staging slot; otherwise the second.
+ */
+static void AuxCapture_QueueLegacyBlock(const uint16_t *raw_buf,
+                                        uint8_t half_block)
 {
   uint16_t *target_buf;
   volatile uint8_t *pending_flag;
@@ -1474,22 +1425,23 @@ static void AuxCapture_QueueDmaBlock(const uint16_t *raw_buf, uint8_t half_block
 
   if (half_block != 0U)
   {
-    target_buf = aux_adc_pending_half_buf;
-    pending_flag = &aux_adc_half_pending;
-    sequence = &aux_adc_half_sequence;
+    target_buf = aux_legacy_pending_half_buf;
+    pending_flag = &aux_legacy_half_pending;
+    sequence = &aux_legacy_half_sequence;
   }
   else
   {
-    target_buf = aux_adc_pending_full_buf;
-    pending_flag = &aux_adc_full_pending;
-    sequence = &aux_adc_full_sequence;
+    target_buf = aux_legacy_pending_full_buf;
+    pending_flag = &aux_legacy_full_pending;
+    sequence = &aux_legacy_full_sequence;
   }
 
   if (*pending_flag != 0U)
   {
-    aux_adc_overrun_count++;
+    aux_adc_diag.overrun_count++;
   }
 
+  /* An odd sequence means the buffer copy is in progress. */
   (*sequence)++;
   __DMB();
   for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
@@ -1500,10 +1452,16 @@ static void AuxCapture_QueueDmaBlock(const uint16_t *raw_buf, uint8_t half_block
   (*sequence)++;
 
   *pending_flag = 1U;
-  aux_adc_pending_count = (uint32_t)aux_adc_half_pending +
-                          (uint32_t)aux_adc_full_pending;
+  aux_adc_diag.pending_count = (uint32_t)aux_legacy_half_pending +
+                          (uint32_t)aux_legacy_full_pending;
 }
 
+/**
+ * @brief Queue one raw-ADC or post-DSP block for deferred analysis.
+ * @param raw_buf Completed block of raw ADC codes.
+ * @param processed_buf Reconstructed S16 block from the speaker path.
+ * @param processed_valid Nonzero when @p processed_buf contains valid samples.
+ */
 static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
                                           const int16_t *processed_buf,
                                           uint8_t processed_valid)
@@ -1513,7 +1471,7 @@ static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
   uint32_t read_index;
   uint32_t available;
   uint32_t source_sequence;
-  uint32_t tap = aux_analysis_tap;
+  uint32_t tap = aux_analysis_diag.tap;
 
   if (tap != AUX_ANALYSIS_TAP_POST_DSP)
   {
@@ -1528,8 +1486,8 @@ static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
     return;
   }
 
-  source_sequence = aux_analysis_source_sequence + 1U;
-  aux_analysis_source_sequence = source_sequence;
+  source_sequence = aux_analysis_diag.source_sequence + 1U;
+  aux_analysis_diag.source_sequence = source_sequence;
 
   write_index = aux_analysis_queue_write;
   read_index = aux_analysis_queue_read;
@@ -1541,18 +1499,20 @@ static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
 
   if (next_index == read_index)
   {
-    aux_analysis_drop_count++;
+    /* Keep one slot empty so equal indices always mean an empty ring. */
+    aux_analysis_diag.drop_count++;
     return;
   }
 
+  /* Snapshot the selected tap once so a block never mixes raw and DSP data. */
   for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
   {
     if (tap == AUX_ANALYSIS_TAP_RAW_ADC)
     {
       uint32_t raw = raw_buf[i];
-      if (raw > 4095U)
+      if (raw > AUX_ADC_MAX_CODE)
       {
-        raw = 4095U;
+        raw = AUX_ADC_MAX_CODE;
       }
       aux_analysis_queue[write_index][i] = (int16_t)raw;
     }
@@ -1569,15 +1529,19 @@ static void AuxCapture_QueueAnalysisBlock(const uint16_t *raw_buf,
   available = (next_index >= read_index) ?
               (next_index - read_index) :
               (AUX_ANALYSIS_QUEUE_BLOCK_COUNT - read_index + next_index);
-  aux_analysis_queue_count = available;
-  if (available > aux_analysis_queue_max)
+  aux_analysis_diag.queue_count = available;
+  if (available > aux_analysis_diag.queue_max)
   {
-    aux_analysis_queue_max = available;
+    aux_analysis_diag.queue_max = available;
   }
 }
 
+/**
+ * @brief Drain a bounded number of queued AUX analysis blocks.
+ */
 static void AuxCapture_ServiceAnalysis(void)
 {
+  /* Bound each main-loop pass so FFT/display work cannot starve capture. */
   for (uint32_t block = 0U;
        block < AUX_ANALYSIS_MAX_BLOCKS_PER_SERVICE;
        block++)
@@ -1592,7 +1556,7 @@ static void AuxCapture_ServiceAnalysis(void)
 
     if (read_index == write_index)
     {
-      aux_analysis_queue_count = 0U;
+      aux_analysis_diag.queue_count = 0U;
       break;
     }
 
@@ -1605,7 +1569,7 @@ static void AuxCapture_ServiceAnalysis(void)
     }
     for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
     {
-      aux_output_service_buf[i] = aux_analysis_queue[read_index][i];
+      aux_analysis_service_buf[i] = aux_analysis_queue[read_index][i];
     }
 
     next_index = read_index + 1U;
@@ -1616,14 +1580,14 @@ static void AuxCapture_ServiceAnalysis(void)
     __DMB();
     aux_analysis_queue_read = next_index;
 
-    if ((aux_analysis_last_serviced_sequence != 0U) &&
-        (source_sequence != (aux_analysis_last_serviced_sequence + 1U)))
+    if ((aux_analysis_diag.last_serviced_sequence != 0U) &&
+        (source_sequence != (aux_analysis_diag.last_serviced_sequence + 1U)))
     {
-      aux_analysis_discontinuity_count++;
+      aux_analysis_diag.discontinuity_count++;
       reset_analysis_stream = 1U;
     }
-    if ((aux_analysis_last_serviced_sequence != 0U) &&
-        (block_tap != aux_analysis_last_serviced_tap))
+    if ((aux_analysis_diag.last_serviced_sequence != 0U) &&
+        (block_tap != aux_analysis_diag.last_serviced_tap))
     {
       /* Never combine RAW_ADC and POST_DSP samples in one analysis frame. */
       reset_analysis_stream = 1U;
@@ -1631,38 +1595,42 @@ static void AuxCapture_ServiceAnalysis(void)
 
     if (block_tap == AUX_ANALYSIS_TAP_RAW_ADC)
     {
-      if ((aux_analysis_raw_origin_valid == 0U) ||
+      if ((aux_analysis_diag.raw_origin_valid == 0U) ||
           (reset_analysis_stream != 0U))
       {
         uint64_t raw_sum = 0U;
 
         for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
         {
-          raw_sum += (uint16_t)aux_output_service_buf[i];
+          raw_sum += (uint16_t)aux_analysis_service_buf[i];
         }
         /* One stable affine origin avoids artificial 128-sample DC steps. */
-        aux_analysis_raw_origin_adc_q8 = (uint32_t)(
-            ((raw_sum * 256U) + (AUX_CAPTURE_BUF_LEN / 2U)) /
+        aux_analysis_diag.raw_origin_adc_q8 = (uint32_t)(
+            ((raw_sum * AUX_Q8_SCALE) + (AUX_CAPTURE_BUF_LEN / 2U)) /
             AUX_CAPTURE_BUF_LEN);
-        aux_analysis_raw_origin_valid = 1U;
+        aux_analysis_diag.raw_origin_valid = 1U;
       }
 
       for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
       {
-        int32_t raw_q8 = (int32_t)(uint16_t)aux_output_service_buf[i] * 256;
+        int32_t raw_q8 =
+            (int32_t)(uint16_t)aux_analysis_service_buf[i] *
+            (int32_t)AUX_Q8_SCALE;
         int32_t centered_q8 =
-            raw_q8 - (int32_t)aux_analysis_raw_origin_adc_q8;
+            raw_q8 - (int32_t)aux_analysis_diag.raw_origin_adc_q8;
 
         /* This is an exact, stream-continuous affine map into signed S24. */
-        aux_analysis_s32_buf[i] = centered_q8 * 16;
+        aux_analysis_s32_buf[i] =
+            centered_q8 * AUX_ADC_Q8_TO_S24_SCALE;
       }
     }
     else
     {
-      aux_analysis_raw_origin_valid = 0U;
+      aux_analysis_diag.raw_origin_valid = 0U;
       for (uint32_t i = 0U; i < AUX_CAPTURE_BUF_LEN; i++)
       {
-        aux_analysis_s32_buf[i] = (int32_t)aux_output_service_buf[i] * 256;
+        aux_analysis_s32_buf[i] =
+            (int32_t)aux_analysis_service_buf[i] * AUX_S16_TO_S24_SCALE;
       }
     }
     if (reset_analysis_stream != 0U)
@@ -1671,38 +1639,46 @@ static void AuxCapture_ServiceAnalysis(void)
       AudioVisualizer_ResetScopeStream();
       AudioSamples_ResetNoiseMetrics();
     }
-    aux_analysis_last_serviced_sequence = source_sequence;
-    aux_analysis_last_serviced_tap = block_tap;
+    aux_analysis_diag.last_serviced_sequence = source_sequence;
+    aux_analysis_diag.last_serviced_tap = block_tap;
     AudioSamples_UpdateFromS32(aux_analysis_s32_buf, AUX_CAPTURE_BUF_LEN);
     AudioFFT_PushSamplesS32(aux_analysis_s32_buf, AUX_CAPTURE_BUF_LEN);
     AudioVisualizer_UpdateFromCenteredS32(aux_analysis_s32_buf,
                                           AUX_CAPTURE_BUF_LEN);
-    aux_analysis_service_count++;
+    aux_analysis_diag.service_count++;
 
     write_index = aux_analysis_queue_write;
     available = (write_index >= next_index) ?
                 (write_index - next_index) :
                 (AUX_ANALYSIS_QUEUE_BLOCK_COUNT - next_index + write_index);
-    aux_analysis_queue_count = available;
+    aux_analysis_diag.queue_count = available;
   }
 }
 
-static void AuxCapture_RecordOutputCycles(uint32_t cycle_start)
+/**
+ * @brief Update realtime processing deadline diagnostics.
+ * @param cycle_start DWT cycle count captured before block processing.
+ */
+static void AuxCapture_RecordRealtimeCycles(uint32_t cycle_start)
 {
   uint32_t elapsed_cycles = DWT->CYCCNT - cycle_start;
 
-  aux_output_process_cycles_last = elapsed_cycles;
-  if (elapsed_cycles > aux_output_process_cycles_max)
+  if (elapsed_cycles > aux_output_diag.process_cycles_max)
   {
-    aux_output_process_cycles_max = elapsed_cycles;
+    aux_output_diag.process_cycles_max = elapsed_cycles;
   }
-  if ((aux_output_process_cycle_budget != 0U) &&
-      (elapsed_cycles > aux_output_process_cycle_budget))
+  if ((aux_output_diag.process_cycle_budget != 0U) &&
+      (elapsed_cycles > aux_output_diag.process_cycle_budget))
   {
-    aux_output_process_deadline_miss_count++;
+    aux_output_diag.process_deadline_miss_count++;
   }
 }
 
+/**
+ * @brief Apply the AUX soft limiter and return an S16 sample.
+ * @param value Unbounded reconstructed sample.
+ * @return Limited signed 16-bit sample.
+ */
 static int16_t AuxCapture_LimitOutput16(int32_t value)
 {
   int32_t magnitude = value;
@@ -1718,8 +1694,7 @@ static int16_t AuxCapture_LimitOutput16(int32_t value)
     return (int16_t)value;
   }
 
-  aux_output_limiter_count++;
-  aux_output_limiter_last_input = value;
+  aux_output_diag.limiter_count++;
 
   limited = AUX_OUTPUT_LIMIT_THRESHOLD +
             ((magnitude - AUX_OUTPUT_LIMIT_THRESHOLD) / 8);
@@ -1733,11 +1708,152 @@ static int16_t AuxCapture_LimitOutput16(int32_t value)
     limited = -limited;
   }
 
-  aux_output_limiter_last_output = (int16_t)limited;
   return (int16_t)limited;
 }
 
-static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t len)
+/**
+ * @brief Apply the optional noise gate to the reconstructed S16 block.
+ *
+ * With the normal line-input configuration the gate is disabled, allowing the
+ * limited samples and their measurements to pass through without redundant
+ * unity-gain multiplications.
+ *
+ * @param len Number of valid samples in the internal output buffer.
+ * @param input_peak Pre-gate peak magnitude.
+ * @param input_abs_sum Sum of pre-gate sample magnitudes.
+ * @param output_peak Receives the post-gate peak magnitude.
+ * @param output_abs_sum Receives the post-gate magnitude sum.
+ */
+static void AuxCapture_ApplyGate(uint32_t len,
+                                 uint32_t input_peak,
+                                 uint32_t input_abs_sum,
+                                 uint32_t *output_peak,
+                                 uint32_t *output_abs_sum)
+{
+  uint32_t input_abs_avg = input_abs_sum / len;
+  uint32_t gate_target_q16;
+  uint32_t gate_enabled = aux_output_controls.gate_enable;
+  uint32_t gate_was_open = aux_output_diag.gate_open;
+  uint32_t peak_candidate =
+      (input_peak >=
+       aux_output_controls.gate_open_peak_threshold_s16) ? 1U : 0U;
+  uint32_t peak_qualified =
+      ((peak_candidate != 0U) &&
+       (input_abs_avg >=
+        aux_output_controls.gate_peak_min_avg_s16)) ? 1U : 0U;
+
+  aux_output_diag.gate_detector_avg_s16 = input_abs_avg;
+  aux_output_diag.gate_peak_qualified = peak_qualified;
+
+  /* Reject isolated pickup spikes without suppressing sustained quiet audio. */
+  if ((peak_candidate != 0U) && (peak_qualified == 0U) &&
+      (input_abs_avg < aux_output_controls.gate_open_avg_threshold_s16))
+  {
+    aux_output_diag.gate_rejected_peak_count++;
+  }
+
+  if (gate_enabled == 0U)
+  {
+    gate_target_q16 = AUX_Q16_UNITY;
+    aux_output_diag.gate_open = 1U;
+    aux_output_gate_gain_current_q16 = AUX_Q16_UNITY;
+    aux_output_diag.gate_hold_remaining_samples = AUX_OUTPUT_GATE_HOLD_SAMPLES;
+  }
+  else if ((peak_qualified != 0U) ||
+           (input_abs_avg >=
+            aux_output_controls.gate_open_avg_threshold_s16))
+  {
+    gate_target_q16 = AUX_Q16_UNITY;
+    aux_output_diag.gate_open = 1U;
+    aux_output_diag.gate_hold_remaining_samples = AUX_OUTPUT_GATE_HOLD_SAMPLES;
+  }
+  else if (aux_output_diag.gate_hold_remaining_samples != 0U)
+  {
+    aux_output_diag.gate_hold_remaining_samples =
+        (aux_output_diag.gate_hold_remaining_samples > len) ?
+        (aux_output_diag.gate_hold_remaining_samples - len) : 0U;
+    gate_target_q16 = AUX_Q16_UNITY;
+    aux_output_diag.gate_open = 1U;
+  }
+  else if (input_abs_avg <=
+           aux_output_controls.gate_close_avg_threshold_s16)
+  {
+    gate_target_q16 = 0U;
+    aux_output_diag.gate_open = 0U;
+  }
+  else
+  {
+    gate_target_q16 =
+        (aux_output_diag.gate_open != 0U) ? AUX_Q16_UNITY : 0U;
+  }
+
+  if ((gate_was_open == 0U) && (aux_output_diag.gate_open != 0U))
+  {
+    aux_output_diag.gate_open_count++;
+  }
+  else if ((gate_was_open != 0U) && (aux_output_diag.gate_open == 0U))
+  {
+    aux_output_diag.gate_close_count++;
+  }
+
+  if (gate_enabled == 0U)
+  {
+    *output_peak = input_peak;
+    *output_abs_sum = input_abs_sum;
+    return;
+  }
+
+  *output_peak = 0U;
+  *output_abs_sum = 0U;
+
+  /* Ramp gain per sample to avoid clicks when the gate changes state. */
+  for (uint32_t i = 0U; i < len; i++)
+  {
+    int32_t gated_sample;
+    uint32_t magnitude;
+
+    if (aux_output_gate_gain_current_q16 < gate_target_q16)
+    {
+      aux_output_gate_gain_current_q16 += AUX_OUTPUT_GATE_ATTACK_STEP_Q16;
+      if (aux_output_gate_gain_current_q16 > gate_target_q16)
+      {
+        aux_output_gate_gain_current_q16 = gate_target_q16;
+      }
+    }
+    else if (aux_output_gate_gain_current_q16 > gate_target_q16)
+    {
+      if (aux_output_gate_gain_current_q16 > AUX_OUTPUT_GATE_RELEASE_STEP_Q16)
+      {
+        aux_output_gate_gain_current_q16 -= AUX_OUTPUT_GATE_RELEASE_STEP_Q16;
+      }
+      else
+      {
+        aux_output_gate_gain_current_q16 = 0U;
+      }
+    }
+
+    gated_sample = ((int32_t)aux_output_s16_buf[i] *
+                    (int32_t)aux_output_gate_gain_current_q16) >> 16;
+    aux_output_s16_buf[i] = (int16_t)gated_sample;
+
+    magnitude = (gated_sample < 0) ?
+                (uint32_t)(-gated_sample) : (uint32_t)gated_sample;
+    *output_abs_sum += magnitude;
+    if (magnitude > *output_peak)
+    {
+      *output_peak = magnitude;
+    }
+  }
+}
+
+/**
+ * @brief Convert one raw ADC DMA block into reconstructed S16 samples.
+ * @param raw_buf Completed block of raw ADC codes.
+ * @param len Number of ADC codes available in @p raw_buf.
+ * @return 1 when a valid reconstructed block was produced; otherwise 0.
+ */
+static uint8_t AuxCapture_ProcessRealtimeBlock(const uint16_t *raw_buf,
+                                               uint32_t len)
 {
   uint32_t peak = 0U;
   uint32_t min_value = UINT32_MAX;
@@ -1750,17 +1866,13 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
   uint32_t lowpass_peak = 0U;
   uint32_t post_gate_peak = 0U;
   uint32_t post_gate_abs_sum = 0U;
-  uint32_t pre_gate_abs_avg;
-  uint32_t gate_target_q16;
-  uint32_t gate_was_open;
-  uint32_t peak_candidate;
-  uint32_t peak_qualified;
   uint32_t clip_samples = 0U;
-  uint32_t headroom_codes = 4095U;
+  uint32_t headroom_codes = AUX_ADC_MAX_CODE;
+  uint32_t gain_q8;
 
   if ((raw_buf == NULL) || (len == 0U) ||
       (audio_input_source != AUDIO_INPUT_SOURCE_AUX) ||
-      (aux_output_realtime_enable == 0U))
+      (aux_output_controls.realtime_enable == 0U))
   {
     return 0U;
   }
@@ -1770,6 +1882,10 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     len = AUX_CAPTURE_BUF_LEN;
   }
 
+  /* Apply debugger-controlled gain coherently across the complete DMA half. */
+  gain_q8 = aux_output_controls.gain_q8;
+
+  /* Convert ADC codes to centered, gain-scaled samples and measure headroom. */
   for (uint32_t i = 0U; i < len; i++)
   {
     uint32_t raw = raw_buf[i];
@@ -1779,22 +1895,22 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     int32_t scaled_sample;
     uint32_t magnitude;
 
-    if (raw > 4095U)
+    if (raw > AUX_ADC_MAX_CODE)
     {
-      raw = 4095U;
+      raw = AUX_ADC_MAX_CODE;
     }
 
     sample_headroom = raw;
-    if ((4095U - raw) < sample_headroom)
+    if ((AUX_ADC_MAX_CODE - raw) < sample_headroom)
     {
-      sample_headroom = 4095U - raw;
+      sample_headroom = AUX_ADC_MAX_CODE - raw;
     }
     if (sample_headroom < headroom_codes)
     {
       headroom_codes = sample_headroom;
     }
     if ((raw <= AUX_ADC_NEAR_RAIL_MARGIN_CODES) ||
-        (raw >= (4095U - AUX_ADC_NEAR_RAIL_MARGIN_CODES)))
+        (raw >= (AUX_ADC_MAX_CODE - AUX_ADC_NEAR_RAIL_MARGIN_CODES)))
     {
       clip_samples++;
     }
@@ -1804,8 +1920,8 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
         (raw_q8 - aux_adc_output_dc_estimate_q8) >> AUX_OUTPUT_DC_TRACK_SHIFT;
     centered_q8 = raw_q8 - aux_adc_output_dc_estimate_q8;
     scaled_sample = (int32_t)(((int64_t)centered_q8 *
-                               16LL *
-                               (int64_t)aux_output_gain_q8) >> 16);
+                               (int64_t)AUX_ADC_TO_S16_SCALE *
+                               (int64_t)gain_q8) >> 16);
     aux_output_filter_buf[i] = (float32_t)scaled_sample;
 
     if (raw < min_value)
@@ -1826,18 +1942,18 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     {
       peak = magnitude;
     }
-
   }
 
-  aux_adc_clip_active = (clip_samples != 0U) ? 1U : 0U;
-  aux_adc_clip_sample_count += clip_samples;
-  aux_adc_headroom_codes = headroom_codes;
+  /* Publish clipping information once per block for coherent diagnostics. */
+  aux_adc_diag.clip_active = (clip_samples != 0U) ? 1U : 0U;
+  aux_adc_diag.clip_sample_count += clip_samples;
+  aux_adc_diag.headroom_codes = headroom_codes;
   if (clip_samples != 0U)
   {
-    aux_adc_clip_block_count++;
+    aux_adc_diag.clip_block_count++;
   }
 
-  if (aux_output_highpass_enable != 0U)
+  if (aux_output_controls.highpass_enable != 0U)
   {
     arm_biquad_cascade_df2T_f32(&aux_output_highpass_filter,
                                  aux_output_filter_buf,
@@ -1855,6 +1971,7 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     }
   }
 
+  /* Measure each filter stage separately to make noise tracing practical. */
   for (uint32_t i = 0U; i < len; i++)
   {
     float32_t sample = aux_output_filter_buf[i];
@@ -1867,7 +1984,7 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     }
   }
 
-  if (aux_output_lowpass_enable != 0U)
+  if (aux_output_controls.lowpass_enable != 0U)
   {
     arm_biquad_cascade_df2T_f32(&aux_output_lowpass_filter,
                                  aux_output_filter_buf,
@@ -1928,127 +2045,40 @@ static uint8_t AuxCapture_PushOutputRawBlock(const uint16_t *raw_buf, uint32_t l
     }
   }
 
-  pre_gate_abs_avg = output_abs_sum / len;
-  aux_output_gate_detector_avg_s16 = pre_gate_abs_avg;
-  gate_was_open = aux_output_gate_open;
-  peak_candidate =
-      (output_peak >= aux_output_gate_open_peak_threshold_s16) ? 1U : 0U;
-  peak_qualified =
-      ((peak_candidate != 0U) &&
-       (pre_gate_abs_avg >= aux_output_gate_peak_min_avg_s16)) ? 1U : 0U;
-  aux_output_gate_peak_qualified = peak_qualified;
+  AuxCapture_ApplyGate(len,
+                       output_peak,
+                       output_abs_sum,
+                       &post_gate_peak,
+                       &post_gate_abs_sum);
 
-  /*
-   * A single pickup spike used to open the AUX path at full gain for the
-   * complete hold/release interval. Qualifying the peak with a small block
-   * average rejects narrow electrical impulses while the independent average
-   * trigger still passes quiet sustained audio and music normally.
-   */
-  if ((peak_candidate != 0U) && (peak_qualified == 0U) &&
-      (pre_gate_abs_avg < aux_output_gate_open_avg_threshold_s16))
-  {
-    aux_output_gate_rejected_peak_count++;
-  }
-
-  if (aux_output_gate_enable == 0U)
-  {
-    gate_target_q16 = 65536U;
-    aux_output_gate_open = 1U;
-    aux_output_gate_gain_current_q16 = 65536U;
-    aux_output_gate_hold_remaining_samples = AUX_OUTPUT_GATE_HOLD_SAMPLES;
-  }
-  else if ((peak_qualified != 0U) ||
-           (pre_gate_abs_avg >= aux_output_gate_open_avg_threshold_s16))
-  {
-    gate_target_q16 = 65536U;
-    aux_output_gate_open = 1U;
-    aux_output_gate_hold_remaining_samples = AUX_OUTPUT_GATE_HOLD_SAMPLES;
-  }
-  else if (aux_output_gate_hold_remaining_samples != 0U)
-  {
-    aux_output_gate_hold_remaining_samples =
-        (aux_output_gate_hold_remaining_samples > len) ?
-        (aux_output_gate_hold_remaining_samples - len) : 0U;
-    gate_target_q16 = 65536U;
-    aux_output_gate_open = 1U;
-  }
-  else if (pre_gate_abs_avg <= aux_output_gate_close_avg_threshold_s16)
-  {
-    gate_target_q16 = 0U;
-    aux_output_gate_open = 0U;
-  }
-  else
-  {
-    gate_target_q16 = (aux_output_gate_open != 0U) ? 65536U : 0U;
-  }
-
-  if ((gate_was_open == 0U) && (aux_output_gate_open != 0U))
-  {
-    aux_output_gate_open_count++;
-  }
-  else if ((gate_was_open != 0U) && (aux_output_gate_open == 0U))
-  {
-    aux_output_gate_close_count++;
-  }
-
-  for (uint32_t i = 0U; i < len; i++)
-  {
-    int32_t gated_sample;
-    uint32_t output_magnitude;
-
-    if (aux_output_gate_gain_current_q16 < gate_target_q16)
-    {
-      aux_output_gate_gain_current_q16 += AUX_OUTPUT_GATE_ATTACK_STEP_Q16;
-      if (aux_output_gate_gain_current_q16 > gate_target_q16)
-      {
-        aux_output_gate_gain_current_q16 = gate_target_q16;
-      }
-    }
-    else if (aux_output_gate_gain_current_q16 > gate_target_q16)
-    {
-      if (aux_output_gate_gain_current_q16 > AUX_OUTPUT_GATE_RELEASE_STEP_Q16)
-      {
-        aux_output_gate_gain_current_q16 -= AUX_OUTPUT_GATE_RELEASE_STEP_Q16;
-      }
-      else
-      {
-        aux_output_gate_gain_current_q16 = 0U;
-      }
-    }
-
-    gated_sample = ((int32_t)aux_output_s16_buf[i] *
-                    (int32_t)aux_output_gate_gain_current_q16) >> 16;
-    aux_output_s16_buf[i] = (int16_t)gated_sample;
-
-    output_magnitude = (gated_sample < 0) ?
-                       (uint32_t)(-gated_sample) :
-                       (uint32_t)gated_sample;
-    post_gate_abs_sum += output_magnitude;
-    if (output_magnitude > post_gate_peak)
-    {
-      post_gate_peak = output_magnitude;
-    }
-  }
-
+  /* Commit the complete block to the I2S ring, then publish its diagnostics. */
   AudioOutput_PushSamplesS16(aux_output_s16_buf, len);
-  aux_output_realtime_push_count += len;
-  aux_output_realtime_peak = peak;
-  aux_output_realtime_avg = sum / len;
-  aux_output_realtime_min = min_value;
-  aux_output_realtime_max = max_value;
-  aux_output_realtime_abs_avg = abs_sum / len;
-  aux_output_realtime_bias_mv = (aux_output_realtime_avg * aux_adc_vref_mv) / 4095U;
-  aux_output_bias_adc = (uint32_t)(aux_adc_output_dc_estimate_q8 >> 8);
-  aux_output_peak_s16 = post_gate_peak;
-  aux_output_abs_avg_s16 = post_gate_abs_sum / len;
-  aux_output_last_sample_s16 = aux_output_s16_buf[len - 1U];
-  aux_output_gate_gain_q8 = aux_output_gate_gain_current_q16 >> 8;
-  aux_output_highpass_peak_s16 = highpass_peak;
-  aux_output_lowpass_peak_s16 = lowpass_peak;
+  aux_output_diag.realtime_push_count += len;
+  aux_output_diag.realtime_peak = peak;
+  aux_output_diag.realtime_avg = sum / len;
+  aux_output_diag.realtime_min = min_value;
+  aux_output_diag.realtime_max = max_value;
+  aux_output_diag.realtime_abs_avg = abs_sum / len;
+  aux_output_diag.bias_adc = (uint32_t)(aux_adc_output_dc_estimate_q8 >> 8);
+  aux_output_diag.peak_s16 = post_gate_peak;
+  aux_output_diag.abs_avg_s16 = post_gate_abs_sum / len;
+  aux_output_diag.gate_gain_q8 = aux_output_gate_gain_current_q16 >> 8;
+  aux_output_diag.highpass_peak_s16 = highpass_peak;
+  aux_output_diag.lowpass_peak_s16 = lowpass_peak;
   return 1U;
 }
 
-static void AuxCapture_ProcessRawBlock(const uint16_t *raw_buf, uint32_t len)
+/**
+ * @brief Process one raw block through the polled/legacy fallback.
+ *
+ * Centered ADC codes are mapped directly into the shared S24 analysis format.
+ * The normal DMA path uses AuxCapture_ProcessRealtimeBlock() instead.
+ *
+ * @param raw_buf Block of raw ADC codes.
+ * @param len Number of ADC codes available in @p raw_buf.
+ */
+static void AuxCapture_ProcessLegacyBlock(const uint16_t *raw_buf,
+                                          uint32_t len)
 {
   uint32_t min_value = UINT32_MAX;
   uint32_t max_value = 0U;
@@ -2074,17 +2104,12 @@ static void AuxCapture_ProcessRawBlock(const uint16_t *raw_buf, uint32_t len)
     int32_t centered;
     uint32_t magnitude;
 
-    if (raw > 4095U)
+    if (raw > AUX_ADC_MAX_CODE)
     {
-      raw = 4095U;
+      raw = AUX_ADC_MAX_CODE;
     }
 
-    aux_adc_raw_buf[i] = (uint16_t)raw;
-    if (i < 16U)
-    {
-      aux_adc_debug_samples[i] = (uint16_t)raw;
-    }
-
+    aux_poll_raw_buf[i] = (uint16_t)raw;
     /*
      * Keep fractional precision in the diagnostic DC tracker. The former
      * integer-code tracker stopped moving inside a +/-127-code dead band and
@@ -2096,7 +2121,7 @@ static void AuxCapture_ProcessRawBlock(const uint16_t *raw_buf, uint32_t len)
         (raw_q8 - aux_adc_analysis_dc_estimate_q8) / 128;
     centered_q8 = raw_q8 - aux_adc_analysis_dc_estimate_q8;
     centered = centered_q8 / 256;
-    aux_sample_buf[i] = centered * 4096;
+    aux_legacy_s32_buf[i] = centered * AUX_ADC_TO_S24_SCALE;
     magnitude = (centered < 0) ? (uint32_t)(-centered) : (uint32_t)centered;
 
     if (raw < min_value)
@@ -2116,26 +2141,24 @@ static void AuxCapture_ProcessRawBlock(const uint16_t *raw_buf, uint32_t len)
     }
   }
 
-  aux_adc_raw = aux_adc_raw_buf[len - 1U];
-  aux_adc_avg = (uint32_t)(sum / len);
-  aux_adc_min = min_value;
-  aux_adc_max = max_value;
-  aux_adc_peak = peak;
-  aux_adc_abs_avg = (uint32_t)(abs_sum / len);
-  aux_adc_signal_smooth = ((aux_adc_signal_smooth * 7U) + aux_adc_abs_avg) / 8U;
-  aux_adc_bias_mv = (aux_adc_avg * aux_adc_vref_mv) / 4095U;
-  aux_adc_sample_count += len;
-  aux_adc_block_count++;
-  aux_ready = 1U;
+  aux_adc_diag.raw = aux_poll_raw_buf[len - 1U];
+  aux_adc_diag.avg = (uint32_t)(sum / len);
+  aux_adc_diag.min = min_value;
+  aux_adc_diag.max = max_value;
+  aux_adc_diag.peak = peak;
+  aux_adc_diag.abs_avg = (uint32_t)(abs_sum / len);
+  aux_adc_diag.sample_count += len;
+  aux_adc_diag.block_count++;
+  aux_adc_diag.ready = 1U;
 
   if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
   {
-    if ((aux_output_realtime_enable == 0U) || (aux_timer_handle == NULL))
+    if ((aux_output_controls.realtime_enable == 0U) || (aux_timer_handle == NULL))
     {
-      AudioSamples_UpdateFromS32(aux_sample_buf, len);
-      AudioOutput_PushSamplesS32(aux_sample_buf, len);
-      AudioFFT_PushSamplesS32(aux_sample_buf, len);
-      AudioVisualizer_UpdateFromS32(aux_sample_buf, len);
+      AudioSamples_UpdateFromS32(aux_legacy_s32_buf, len);
+      AudioOutput_PushSamplesS32(aux_legacy_s32_buf, len);
+      AudioFFT_PushSamplesS32(aux_legacy_s32_buf, len);
+      AudioVisualizer_UpdateFromS32(aux_legacy_s32_buf, len);
     }
   }
 }

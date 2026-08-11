@@ -34,6 +34,11 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+/*
+ * Live Expressions views are grouped by subsystem.  Keep the AUX view focused
+ * on input quality and realtime safety; FFT and I2S-output details have their
+ * own views and are not duplicated here.
+ */
 typedef struct
 {
   uint32_t snapshot_sequence_begin;
@@ -113,50 +118,45 @@ typedef struct
 {
   uint32_t snapshot_sequence_begin;
   uint32_t tick_ms;
+
+  /* ADC input quality before speaker-path filtering. */
   uint32_t source_samples_total;
-  uint32_t analysis_process_count;
   uint32_t raw_avg_adc_codes;
   uint32_t raw_min_adc_codes;
   uint32_t raw_max_adc_codes;
   uint32_t raw_peak_adc_codes;
   uint32_t raw_abs_avg_adc_codes;
-  uint32_t raw_bias_mv;
   uint32_t tracked_bias_adc_codes;
   uint32_t headroom_adc_codes;
   uint32_t adc_clip_active;
+
+  /* Realtime speaker DSP stage levels. */
   uint32_t output_gain_q8;
   uint32_t highpass_cutoff_hz;
   uint32_t highpass_peak_s16;
   uint32_t lowpass_cutoff_hz;
   uint32_t lowpass_peak_s16;
   uint32_t gate_detector_avg_s16;
-  uint32_t gate_peak_qualified;
   uint32_t gate_open;
   uint32_t gate_gain_q8;
-  uint32_t gate_hold_samples;
-  uint32_t gate_open_peak_threshold_s16;
-  uint32_t gate_peak_min_avg_s16;
-  uint32_t gate_open_avg_threshold_s16;
-  uint32_t gate_close_avg_threshold_s16;
   uint32_t post_gate_peak_s16;
   uint32_t post_gate_abs_avg_s16;
+
+  /* Selected analysis tap and deferred queue health. */
   uint32_t analysis_peak_s16;
   uint32_t analysis_abs_avg_s16;
   uint32_t analysis_noise_floor_s16;
   uint32_t analysis_signal_s16;
-  uint32_t analysis_noise_floor_frozen;
-  uint32_t analysis_noise_floor_freeze_count;
   uint32_t analysis_selected_tap;
   uint32_t analysis_last_serviced_tap;
-  uint32_t analysis_raw_origin_adc_q8;
   uint32_t analysis_raw_origin_adc_codes;
   uint32_t analysis_raw_origin_valid;
   uint32_t analysis_queue_blocks;
   uint32_t analysis_queue_max_blocks;
   uint32_t analysis_queue_capacity_blocks;
   uint32_t analysis_blocks_per_sec;
-  uint32_t analysis_source_sequence;
-  uint32_t analysis_last_serviced_sequence;
+
+  /* Lifetime totals plus the most recent diagnostic-window deltas. */
   uint32_t counter_window_ms;
   uint32_t adc_clip_samples_total;
   uint32_t adc_clip_samples_delta;
@@ -164,19 +164,10 @@ typedef struct
   uint32_t adc_clip_blocks_delta;
   uint32_t limiter_samples_total;
   uint32_t limiter_samples_delta;
-  uint32_t adc_overrun_blocks_total;
-  uint32_t adc_overrun_blocks_delta;
   uint32_t analysis_drop_blocks_total;
   uint32_t analysis_drop_blocks_delta;
   uint32_t analysis_discontinuities_total;
   uint32_t analysis_discontinuities_delta;
-  uint32_t gate_rejected_peaks_total;
-  uint32_t gate_rejected_peaks_delta;
-  uint32_t gate_open_events_total;
-  uint32_t gate_open_events_delta;
-  uint32_t gate_close_events_total;
-  uint32_t gate_close_events_delta;
-  uint32_t output_process_cycles_last;
   uint32_t output_process_cycles_max;
   uint32_t output_process_cycle_budget;
   uint32_t deadline_miss_blocks_total;
@@ -258,6 +249,8 @@ typedef struct
 {
   uint32_t snapshot_sequence_begin;
   uint32_t tick_ms;
+
+  /* PCM5102 transmit activity and DMA transport state. */
   uint32_t input_source;
   uint32_t output_mode;
   uint32_t force_test_tone;
@@ -284,26 +277,8 @@ typedef struct
   uint32_t ring_available_max_samples;
   uint32_t ring_push_samples_total;
   uint32_t ring_pop_samples_total;
-  uint32_t analysis_queue_source;
-  uint32_t analysis_queue_blocks;
-  uint32_t analysis_queue_max_blocks;
-  uint32_t analysis_queue_capacity_blocks;
-  uint32_t analysis_source_sequence;
-  uint32_t analysis_last_serviced_sequence;
-  uint32_t analysis_drop_blocks_total;
-  uint32_t analysis_drop_blocks_delta;
-  uint32_t analysis_discontinuities_total;
-  uint32_t analysis_discontinuities_delta;
-  uint32_t mic_processed_samples_total;
-  uint32_t mic_output_peak_s16;
-  uint32_t mic_output_abs_avg_s16;
-  uint32_t mic_gate_open;
-  uint32_t mic_selected_slot;
-  uint32_t mic_process_cycles_last;
-  uint32_t mic_process_cycles_max;
-  uint32_t mic_process_cycle_budget;
-  uint32_t mic_deadline_miss_blocks_total;
-  uint32_t mic_deadline_miss_blocks_delta;
+
+  /* Output faults; microphone-input diagnostics intentionally live elsewhere. */
   uint32_t start_status;
   uint32_t i2s_error_code;
   uint32_t dma_error_code;
@@ -324,19 +299,13 @@ typedef struct
   uint32_t aux_clip_samples;
   uint32_t aux_clip_blocks;
   uint32_t aux_limiter_samples;
-  uint32_t aux_adc_overrun_blocks;
   uint32_t aux_analysis_drop_blocks;
   uint32_t aux_analysis_discontinuities;
-  uint32_t aux_gate_rejected_peaks;
-  uint32_t aux_gate_open_events;
-  uint32_t aux_gate_close_events;
   uint32_t aux_deadline_miss_blocks;
   uint32_t fft_dropped_frames;
   uint32_t fft_stream_resets;
   uint32_t fft_deadline_miss_frames;
-  uint32_t i2s_analysis_drop_blocks;
   uint32_t i2s_analysis_discontinuities;
-  uint32_t i2s_mic_deadline_miss_blocks;
   uint32_t tx_underrun_samples;
   uint32_t tx_overrun_samples;
   uint32_t tx_runtime_error_events;
@@ -418,12 +387,7 @@ volatile uint32_t display_startup_draw_status = HAL_ERROR;
 volatile uint32_t display_direct_test_count = 0U;
 volatile uint32_t display_direct_test_x = 0U;
 volatile uint32_t display_direct_test_status = HAL_ERROR;
-volatile uint8_t aux_capture_start_failed = 0U;
 volatile uint8_t audio_output_start_failed = 0U;
-volatile uint32_t diag_aux_blocks_per_sec = 0U;
-volatile uint32_t diag_aux_samples_per_sec = 0U;
-volatile uint32_t diag_aux_realtime_samples_per_sec = 0U;
-volatile uint32_t diag_aux_analysis_blocks_per_sec = 0U;
 volatile uint32_t diag_i2s_blocks_per_sec = 0U;
 volatile uint32_t diag_i2s_samples_per_sec = 0U;
 volatile uint32_t diag_i2s_analysis_blocks_per_sec = 0U;
@@ -523,7 +487,7 @@ static uint32_t DiagnosticRatePerSecond(uint32_t delta,
 static uint32_t AudioAnalysis_GetQueueBlocks(void)
 {
   return (audio_input_source == AUDIO_INPUT_SOURCE_AUX) ?
-         aux_analysis_queue_count : i2s_mic_analysis_queue_count;
+         aux_analysis_diag.queue_count : i2s_mic_analysis_queue_count;
 }
 
 static uint32_t AudioAnalysis_GetBlockSamples(void)
@@ -556,6 +520,7 @@ static void AudioAnalysis_ServiceScheduled(void)
   uint32_t passes = 0U;
 
   analysis_queue_before_service_blocks = queue_blocks;
+  /* Hysteresis avoids repeatedly entering and leaving catch-up at one level. */
   if ((analysis_catchup_active == 0U) &&
       (queue_blocks >= AUDIO_ANALYSIS_CATCHUP_START_BLOCKS))
   {
@@ -578,6 +543,7 @@ static void AudioAnalysis_ServiceScheduled(void)
   pass_limit = (analysis_catchup_active != 0U) ?
                AUDIO_ANALYSIS_CATCHUP_MAX_PASSES : 1U;
 
+  /* The pass limit preserves time for display and other foreground work. */
   for (passes = 0U; passes < pass_limit; passes++)
   {
     AudioAnalysis_ServiceOnce();
@@ -609,29 +575,22 @@ static AudioDebugCounterState AudioDebug_ReadCounterState(void)
 {
   AudioDebugCounterState state;
 
-  state.aux_clip_samples = aux_adc_clip_sample_count;
-  state.aux_clip_blocks = aux_adc_clip_block_count;
-  state.aux_limiter_samples = aux_output_limiter_count;
-  state.aux_adc_overrun_blocks = aux_adc_overrun_count;
-  state.aux_analysis_drop_blocks = aux_analysis_drop_count;
-  state.aux_analysis_discontinuities = aux_analysis_discontinuity_count;
-  state.aux_gate_rejected_peaks = aux_output_gate_rejected_peak_count;
-  state.aux_gate_open_events = aux_output_gate_open_count;
-  state.aux_gate_close_events = aux_output_gate_close_count;
-  state.aux_deadline_miss_blocks = aux_output_process_deadline_miss_count;
+  state.aux_clip_samples = aux_adc_diag.clip_sample_count;
+  state.aux_clip_blocks = aux_adc_diag.clip_block_count;
+  state.aux_limiter_samples = aux_output_diag.limiter_count;
+  state.aux_analysis_drop_blocks = aux_analysis_diag.drop_count;
+  state.aux_analysis_discontinuities = aux_analysis_diag.discontinuity_count;
+  state.aux_deadline_miss_blocks = aux_output_diag.process_deadline_miss_count;
   state.fft_dropped_frames = audio_fft_drop_count;
   state.fft_stream_resets = audio_fft_stream_reset_count;
   state.fft_deadline_miss_frames =
       audio_fft_process_deadline_miss_count;
-  state.i2s_analysis_drop_blocks = i2s_mic_analysis_drop_count;
   state.i2s_analysis_discontinuities =
       i2s_mic_analysis_discontinuity_count;
-  state.i2s_mic_deadline_miss_blocks =
-      i2s_mic_process_deadline_miss_count;
-  state.tx_underrun_samples = audio_out_mic_underrun_count;
-  state.tx_overrun_samples = audio_out_mic_overrun_count;
-  state.tx_runtime_error_events = audio_out_i2s_runtime_error_count;
-  state.tx_limiter_samples = audio_out_limiter_count;
+  state.tx_underrun_samples = audio_out_ring.underrun_sample_count;
+  state.tx_overrun_samples = audio_out_ring.overrun_sample_count;
+  state.tx_runtime_error_events = audio_out_transport.runtime_error_count;
+  state.tx_limiter_samples = audio_out_tx_diag.limiter_sample_count;
 
   return state;
 }
@@ -655,24 +614,12 @@ static void AudioDebug_UpdateCounterDeltas(uint32_t elapsed_ms)
       current.aux_clip_blocks - audio_debug_counter_baseline.aux_clip_blocks;
   audio_debug_counter_delta.aux_limiter_samples =
       current.aux_limiter_samples - audio_debug_counter_baseline.aux_limiter_samples;
-  audio_debug_counter_delta.aux_adc_overrun_blocks =
-      current.aux_adc_overrun_blocks -
-      audio_debug_counter_baseline.aux_adc_overrun_blocks;
   audio_debug_counter_delta.aux_analysis_drop_blocks =
       current.aux_analysis_drop_blocks -
       audio_debug_counter_baseline.aux_analysis_drop_blocks;
   audio_debug_counter_delta.aux_analysis_discontinuities =
       current.aux_analysis_discontinuities -
       audio_debug_counter_baseline.aux_analysis_discontinuities;
-  audio_debug_counter_delta.aux_gate_rejected_peaks =
-      current.aux_gate_rejected_peaks -
-      audio_debug_counter_baseline.aux_gate_rejected_peaks;
-  audio_debug_counter_delta.aux_gate_open_events =
-      current.aux_gate_open_events -
-      audio_debug_counter_baseline.aux_gate_open_events;
-  audio_debug_counter_delta.aux_gate_close_events =
-      current.aux_gate_close_events -
-      audio_debug_counter_baseline.aux_gate_close_events;
   audio_debug_counter_delta.aux_deadline_miss_blocks =
       current.aux_deadline_miss_blocks -
       audio_debug_counter_baseline.aux_deadline_miss_blocks;
@@ -685,15 +632,9 @@ static void AudioDebug_UpdateCounterDeltas(uint32_t elapsed_ms)
   audio_debug_counter_delta.fft_deadline_miss_frames =
       current.fft_deadline_miss_frames -
       audio_debug_counter_baseline.fft_deadline_miss_frames;
-  audio_debug_counter_delta.i2s_analysis_drop_blocks =
-      current.i2s_analysis_drop_blocks -
-      audio_debug_counter_baseline.i2s_analysis_drop_blocks;
   audio_debug_counter_delta.i2s_analysis_discontinuities =
       current.i2s_analysis_discontinuities -
       audio_debug_counter_baseline.i2s_analysis_discontinuities;
-  audio_debug_counter_delta.i2s_mic_deadline_miss_blocks =
-      current.i2s_mic_deadline_miss_blocks -
-      audio_debug_counter_baseline.i2s_mic_deadline_miss_blocks;
   audio_debug_counter_delta.tx_underrun_samples =
       current.tx_underrun_samples -
       audio_debug_counter_baseline.tx_underrun_samples;
@@ -723,12 +664,9 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
   AudioVisualizerScopeDiagnostics scope_diagnostics;
   uint32_t selected_analysis_block_samples;
   uint32_t selected_analysis_queue_blocks;
-  uint32_t selected_analysis_queue_max_blocks;
   uint32_t selected_analysis_queue_capacity_blocks;
   uint32_t selected_analysis_source_sequence;
   uint32_t selected_analysis_last_serviced_sequence;
-  uint32_t selected_analysis_drop_blocks;
-  uint32_t selected_analysis_drop_blocks_delta;
   uint32_t selected_analysis_discontinuities;
   uint32_t selected_analysis_discontinuities_delta;
   uint32_t selected_analysis_blocks_per_sec;
@@ -736,32 +674,24 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
 
   if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
   {
-    selected_analysis_queue_blocks = aux_analysis_queue_count;
-    selected_analysis_queue_max_blocks = aux_analysis_queue_max;
-    selected_analysis_queue_capacity_blocks = aux_analysis_queue_capacity;
-    selected_analysis_source_sequence = aux_analysis_source_sequence;
+    selected_analysis_queue_blocks = aux_analysis_diag.queue_count;
+    selected_analysis_queue_capacity_blocks = aux_analysis_diag.queue_capacity;
+    selected_analysis_source_sequence = aux_analysis_diag.source_sequence;
     selected_analysis_last_serviced_sequence =
-        aux_analysis_last_serviced_sequence;
-    selected_analysis_drop_blocks = aux_analysis_drop_count;
-    selected_analysis_drop_blocks_delta =
-        audio_debug_counter_delta.aux_analysis_drop_blocks;
-    selected_analysis_discontinuities = aux_analysis_discontinuity_count;
+        aux_analysis_diag.last_serviced_sequence;
+    selected_analysis_discontinuities = aux_analysis_diag.discontinuity_count;
     selected_analysis_discontinuities_delta =
         audio_debug_counter_delta.aux_analysis_discontinuities;
-    selected_analysis_blocks_per_sec = diag_aux_analysis_blocks_per_sec;
+    selected_analysis_blocks_per_sec = aux_analysis_diag.blocks_per_sec;
   }
   else
   {
     selected_analysis_queue_blocks = i2s_mic_analysis_queue_count;
-    selected_analysis_queue_max_blocks = i2s_mic_analysis_queue_max;
     selected_analysis_queue_capacity_blocks =
         i2s_mic_analysis_queue_capacity;
     selected_analysis_source_sequence = i2s_mic_analysis_source_sequence;
     selected_analysis_last_serviced_sequence =
         i2s_mic_analysis_last_serviced_sequence;
-    selected_analysis_drop_blocks = i2s_mic_analysis_drop_count;
-    selected_analysis_drop_blocks_delta =
-        audio_debug_counter_delta.i2s_analysis_drop_blocks;
     selected_analysis_discontinuities =
         i2s_mic_analysis_discontinuity_count;
     selected_analysis_discontinuities_delta =
@@ -782,13 +712,13 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
   audio_debug_config.firmware_build_id = AUDIO_FIRMWARE_BUILD_ID;
   audio_debug_config.compiler_optimized = AUDIO_COMPILER_OPTIMIZED;
   audio_debug_config.input_source = audio_input_source;
-  audio_debug_config.output_mode = audio_out_mode_debug;
-  audio_debug_config.force_test_tone = audio_out_force_test_tone;
-  audio_debug_config.aux_realtime_enabled = aux_output_realtime_enable;
-  audio_debug_config.highpass_enabled = aux_output_highpass_enable;
-  audio_debug_config.lowpass_enabled = aux_output_lowpass_enable;
-  audio_debug_config.gate_enabled = aux_output_gate_enable;
-  audio_debug_config.aux_samples_per_sec = diag_aux_realtime_samples_per_sec;
+  audio_debug_config.output_mode = audio_out_controls.mode;
+  audio_debug_config.force_test_tone = audio_out_controls.force_test_tone;
+  audio_debug_config.aux_realtime_enabled = aux_output_controls.realtime_enable;
+  audio_debug_config.highpass_enabled = aux_output_controls.highpass_enable;
+  audio_debug_config.lowpass_enabled = aux_output_controls.lowpass_enable;
+  audio_debug_config.gate_enabled = aux_output_controls.gate_enable;
+  audio_debug_config.aux_samples_per_sec = aux_output_diag.samples_per_sec;
   audio_debug_config.analysis_block_samples =
       selected_analysis_block_samples;
   audio_debug_config.analysis_expected_blocks_per_sec =
@@ -904,36 +834,25 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
   audio_debug_aux.snapshot_sequence_begin = sequence;
   __DMB();
   audio_debug_aux.tick_ms = tick_ms;
-  audio_debug_aux.source_samples_total = aux_output_realtime_push_count;
-  audio_debug_aux.analysis_process_count = audio_sample_process_count;
-  audio_debug_aux.raw_avg_adc_codes = aux_output_realtime_avg;
-  audio_debug_aux.raw_min_adc_codes = aux_output_realtime_min;
-  audio_debug_aux.raw_max_adc_codes = aux_output_realtime_max;
-  audio_debug_aux.raw_peak_adc_codes = aux_output_realtime_peak;
-  audio_debug_aux.raw_abs_avg_adc_codes = aux_output_realtime_abs_avg;
-  audio_debug_aux.raw_bias_mv = aux_output_realtime_bias_mv;
-  audio_debug_aux.tracked_bias_adc_codes = aux_output_bias_adc;
-  audio_debug_aux.headroom_adc_codes = aux_adc_headroom_codes;
-  audio_debug_aux.adc_clip_active = aux_adc_clip_active;
-  audio_debug_aux.output_gain_q8 = aux_output_gain_q8;
-  audio_debug_aux.highpass_cutoff_hz = aux_output_highpass_cutoff_hz;
-  audio_debug_aux.highpass_peak_s16 = aux_output_highpass_peak_s16;
-  audio_debug_aux.lowpass_cutoff_hz = aux_output_lowpass_cutoff_hz;
-  audio_debug_aux.lowpass_peak_s16 = aux_output_lowpass_peak_s16;
-  audio_debug_aux.gate_detector_avg_s16 = aux_output_gate_detector_avg_s16;
-  audio_debug_aux.gate_peak_qualified = aux_output_gate_peak_qualified;
-  audio_debug_aux.gate_open = aux_output_gate_open;
-  audio_debug_aux.gate_gain_q8 = aux_output_gate_gain_q8;
-  audio_debug_aux.gate_hold_samples = aux_output_gate_hold_remaining_samples;
-  audio_debug_aux.gate_open_peak_threshold_s16 =
-      aux_output_gate_open_peak_threshold_s16;
-  audio_debug_aux.gate_peak_min_avg_s16 = aux_output_gate_peak_min_avg_s16;
-  audio_debug_aux.gate_open_avg_threshold_s16 =
-      aux_output_gate_open_avg_threshold_s16;
-  audio_debug_aux.gate_close_avg_threshold_s16 =
-      aux_output_gate_close_avg_threshold_s16;
-  audio_debug_aux.post_gate_peak_s16 = aux_output_peak_s16;
-  audio_debug_aux.post_gate_abs_avg_s16 = aux_output_abs_avg_s16;
+  audio_debug_aux.source_samples_total = aux_output_diag.realtime_push_count;
+  audio_debug_aux.raw_avg_adc_codes = aux_output_diag.realtime_avg;
+  audio_debug_aux.raw_min_adc_codes = aux_output_diag.realtime_min;
+  audio_debug_aux.raw_max_adc_codes = aux_output_diag.realtime_max;
+  audio_debug_aux.raw_peak_adc_codes = aux_output_diag.realtime_peak;
+  audio_debug_aux.raw_abs_avg_adc_codes = aux_output_diag.realtime_abs_avg;
+  audio_debug_aux.tracked_bias_adc_codes = aux_output_diag.bias_adc;
+  audio_debug_aux.headroom_adc_codes = aux_adc_diag.headroom_codes;
+  audio_debug_aux.adc_clip_active = aux_adc_diag.clip_active;
+  audio_debug_aux.output_gain_q8 = aux_output_controls.gain_q8;
+  audio_debug_aux.highpass_cutoff_hz = aux_output_diag.highpass_cutoff_hz;
+  audio_debug_aux.highpass_peak_s16 = aux_output_diag.highpass_peak_s16;
+  audio_debug_aux.lowpass_cutoff_hz = aux_output_diag.lowpass_cutoff_hz;
+  audio_debug_aux.lowpass_peak_s16 = aux_output_diag.lowpass_peak_s16;
+  audio_debug_aux.gate_detector_avg_s16 = aux_output_diag.gate_detector_avg_s16;
+  audio_debug_aux.gate_open = aux_output_diag.gate_open;
+  audio_debug_aux.gate_gain_q8 = aux_output_diag.gate_gain_q8;
+  audio_debug_aux.post_gate_peak_s16 = aux_output_diag.peak_s16;
+  audio_debug_aux.post_gate_abs_avg_s16 = aux_output_diag.abs_avg_s16;
   if (audio_input_source == AUDIO_INPUT_SOURCE_AUX)
   {
     audio_debug_aux.analysis_peak_s16 = audio_sample_peak / 256U;
@@ -948,69 +867,41 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
     audio_debug_aux.analysis_noise_floor_s16 = 0U;
     audio_debug_aux.analysis_signal_s16 = 0U;
   }
-  audio_debug_aux.analysis_noise_floor_frozen =
-      (audio_input_source == AUDIO_INPUT_SOURCE_AUX) ?
-      (uint32_t)audio_sample_noise_floor_frozen : 0U;
-  audio_debug_aux.analysis_noise_floor_freeze_count =
-      (audio_input_source == AUDIO_INPUT_SOURCE_AUX) ?
-      audio_sample_noise_floor_freeze_count : 0U;
-  audio_debug_aux.analysis_selected_tap = aux_analysis_tap;
+  audio_debug_aux.analysis_selected_tap = aux_analysis_diag.tap;
   audio_debug_aux.analysis_last_serviced_tap =
-      aux_analysis_last_serviced_tap;
-  audio_debug_aux.analysis_raw_origin_adc_q8 =
-      aux_analysis_raw_origin_adc_q8;
+      aux_analysis_diag.last_serviced_tap;
   audio_debug_aux.analysis_raw_origin_adc_codes =
-      (aux_analysis_raw_origin_adc_q8 + 128U) / 256U;
+      (aux_analysis_diag.raw_origin_adc_q8 + 128U) / 256U;
   audio_debug_aux.analysis_raw_origin_valid =
-      aux_analysis_raw_origin_valid;
-  audio_debug_aux.analysis_queue_blocks = aux_analysis_queue_count;
-  audio_debug_aux.analysis_queue_max_blocks = aux_analysis_queue_max;
+      aux_analysis_diag.raw_origin_valid;
+  audio_debug_aux.analysis_queue_blocks = aux_analysis_diag.queue_count;
+  audio_debug_aux.analysis_queue_max_blocks = aux_analysis_diag.queue_max;
   audio_debug_aux.analysis_queue_capacity_blocks =
-      aux_analysis_queue_capacity;
-  audio_debug_aux.analysis_blocks_per_sec =
-      diag_aux_analysis_blocks_per_sec;
-  audio_debug_aux.analysis_source_sequence =
-      aux_analysis_source_sequence;
-  audio_debug_aux.analysis_last_serviced_sequence =
-      aux_analysis_last_serviced_sequence;
+      aux_analysis_diag.queue_capacity;
+  audio_debug_aux.analysis_blocks_per_sec = aux_analysis_diag.blocks_per_sec;
   audio_debug_aux.counter_window_ms = audio_debug_counter_window_ms;
-  audio_debug_aux.adc_clip_samples_total = aux_adc_clip_sample_count;
+  audio_debug_aux.adc_clip_samples_total = aux_adc_diag.clip_sample_count;
   audio_debug_aux.adc_clip_samples_delta =
       audio_debug_counter_delta.aux_clip_samples;
-  audio_debug_aux.adc_clip_blocks_total = aux_adc_clip_block_count;
+  audio_debug_aux.adc_clip_blocks_total = aux_adc_diag.clip_block_count;
   audio_debug_aux.adc_clip_blocks_delta =
       audio_debug_counter_delta.aux_clip_blocks;
-  audio_debug_aux.limiter_samples_total = aux_output_limiter_count;
+  audio_debug_aux.limiter_samples_total = aux_output_diag.limiter_count;
   audio_debug_aux.limiter_samples_delta =
       audio_debug_counter_delta.aux_limiter_samples;
-  audio_debug_aux.adc_overrun_blocks_total = aux_adc_overrun_count;
-  audio_debug_aux.adc_overrun_blocks_delta =
-      audio_debug_counter_delta.aux_adc_overrun_blocks;
-  audio_debug_aux.analysis_drop_blocks_total = aux_analysis_drop_count;
+  audio_debug_aux.analysis_drop_blocks_total = aux_analysis_diag.drop_count;
   audio_debug_aux.analysis_drop_blocks_delta =
       audio_debug_counter_delta.aux_analysis_drop_blocks;
   audio_debug_aux.analysis_discontinuities_total =
-      aux_analysis_discontinuity_count;
+      aux_analysis_diag.discontinuity_count;
   audio_debug_aux.analysis_discontinuities_delta =
       audio_debug_counter_delta.aux_analysis_discontinuities;
-  audio_debug_aux.gate_rejected_peaks_total =
-      aux_output_gate_rejected_peak_count;
-  audio_debug_aux.gate_rejected_peaks_delta =
-      audio_debug_counter_delta.aux_gate_rejected_peaks;
-  audio_debug_aux.gate_open_events_total = aux_output_gate_open_count;
-  audio_debug_aux.gate_open_events_delta =
-      audio_debug_counter_delta.aux_gate_open_events;
-  audio_debug_aux.gate_close_events_total = aux_output_gate_close_count;
-  audio_debug_aux.gate_close_events_delta =
-      audio_debug_counter_delta.aux_gate_close_events;
-  audio_debug_aux.output_process_cycles_last =
-      aux_output_process_cycles_last;
   audio_debug_aux.output_process_cycles_max =
-      aux_output_process_cycles_max;
+      aux_output_diag.process_cycles_max;
   audio_debug_aux.output_process_cycle_budget =
-      aux_output_process_cycle_budget;
+      aux_output_diag.process_cycle_budget;
   audio_debug_aux.deadline_miss_blocks_total =
-      aux_output_process_deadline_miss_count;
+      aux_output_diag.process_deadline_miss_count;
   audio_debug_aux.deadline_miss_blocks_delta =
       audio_debug_counter_delta.aux_deadline_miss_blocks;
   __DMB();
@@ -1124,20 +1015,21 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
   __DMB();
   audio_debug_i2s.tick_ms = tick_ms;
   audio_debug_i2s.input_source = audio_input_source;
-  audio_debug_i2s.output_mode = audio_out_mode_debug;
-  audio_debug_i2s.force_test_tone = audio_out_force_test_tone;
-  audio_debug_i2s.streaming = audio_out_mic_streaming;
-  audio_debug_i2s.tx_peak_s16 = audio_out_tx_peak;
-  audio_debug_i2s.tx_abs_avg_s16 = audio_out_tx_abs_avg;
-  audio_debug_i2s.tx_level_smooth_s16 = audio_out_tx_level_smooth;
-  audio_debug_i2s.tx_debug_updates_total = audio_out_tx_debug_update_count;
-  audio_debug_i2s.tx_half_callbacks_total = audio_out_half_count;
-  audio_debug_i2s.tx_full_callbacks_total = audio_out_full_count;
-  audio_debug_i2s.tx_fill_count_total = audio_out_fill_count;
-  audio_debug_i2s.output_ready = audio_out_ready;
+  audio_debug_i2s.output_mode = audio_out_controls.mode;
+  audio_debug_i2s.force_test_tone = audio_out_controls.force_test_tone;
+  audio_debug_i2s.streaming = audio_out_ring.streaming;
+  audio_debug_i2s.tx_peak_s16 = audio_out_tx_diag.peak_s16;
+  audio_debug_i2s.tx_abs_avg_s16 = audio_out_tx_diag.abs_avg_s16;
+  audio_debug_i2s.tx_level_smooth_s16 =
+      audio_out_tx_diag.level_smooth_s16;
+  audio_debug_i2s.tx_debug_updates_total = audio_out_tx_diag.update_count;
+  audio_debug_i2s.tx_half_callbacks_total = audio_out_transport.half_callback_count;
+  audio_debug_i2s.tx_full_callbacks_total = audio_out_transport.full_callback_count;
+  audio_debug_i2s.tx_fill_count_total = audio_out_transport.fill_count;
+  audio_debug_i2s.output_ready = audio_out_transport.ready;
   audio_debug_i2s.tx_callback_age_ms =
-      (tick_ms >= audio_out_last_callback_tick_ms) ?
-      (tick_ms - audio_out_last_callback_tick_ms) : 0U;
+      (tick_ms >= audio_out_transport.last_callback_tick_ms) ?
+      (tick_ms - audio_out_transport.last_callback_tick_ms) : 0U;
   audio_debug_i2s.i2s_i2scfgr = hi2s3.Instance->I2SCFGR;
   audio_debug_i2s.i2s_i2spr = hi2s3.Instance->I2SPR;
   audio_debug_i2s.i2s_cr2 = hi2s3.Instance->CR2;
@@ -1153,65 +1045,34 @@ static void AudioDebug_Refresh(uint32_t tick_ms)
     audio_debug_i2s.dma_ndtr = 0U;
   }
   audio_debug_i2s.digital_transport_active =
-      ((audio_out_ready != 0U) &&
+      ((audio_out_transport.ready != 0U) &&
        ((audio_debug_i2s.i2s_i2scfgr & SPI_I2SCFGR_I2SE) != 0U) &&
        ((audio_debug_i2s.i2s_cr2 & SPI_CR2_TXDMAEN) != 0U) &&
        ((audio_debug_i2s.dma_cr & DMA_SxCR_EN) != 0U) &&
        (audio_debug_i2s.tx_callback_age_ms <= 20U)) ? 1U : 0U;
   audio_debug_i2s.nonzero_audio_active =
       ((audio_debug_i2s.digital_transport_active != 0U) &&
-       (audio_out_tx_peak != 0U)) ? 1U : 0U;
-  audio_debug_i2s.ring_available_samples = audio_out_mic_available;
-  audio_debug_i2s.ring_available_min_samples = audio_out_mic_available_min;
-  audio_debug_i2s.ring_available_max_samples = audio_out_mic_available_max;
-  audio_debug_i2s.ring_push_samples_total = audio_out_mic_push_count;
-  audio_debug_i2s.ring_pop_samples_total = audio_out_mic_pop_count;
-  audio_debug_i2s.analysis_queue_source = audio_input_source;
-  audio_debug_i2s.analysis_queue_blocks = selected_analysis_queue_blocks;
-  audio_debug_i2s.analysis_queue_max_blocks =
-      selected_analysis_queue_max_blocks;
-  audio_debug_i2s.analysis_queue_capacity_blocks =
-      selected_analysis_queue_capacity_blocks;
-  audio_debug_i2s.analysis_source_sequence =
-      selected_analysis_source_sequence;
-  audio_debug_i2s.analysis_last_serviced_sequence =
-      selected_analysis_last_serviced_sequence;
-  audio_debug_i2s.analysis_drop_blocks_total =
-      selected_analysis_drop_blocks;
-  audio_debug_i2s.analysis_drop_blocks_delta =
-      selected_analysis_drop_blocks_delta;
-  audio_debug_i2s.analysis_discontinuities_total =
-      selected_analysis_discontinuities;
-  audio_debug_i2s.analysis_discontinuities_delta =
-      selected_analysis_discontinuities_delta;
-  audio_debug_i2s.mic_processed_samples_total =
-      i2s_mic_processed_sample_count;
-  audio_debug_i2s.mic_output_peak_s16 = i2s_mic_output_peak_s16;
-  audio_debug_i2s.mic_output_abs_avg_s16 = i2s_mic_output_abs_avg_s16;
-  audio_debug_i2s.mic_gate_open = i2s_mic_gate_open;
-  audio_debug_i2s.mic_selected_slot = i2s_mic_selected_slot;
-  audio_debug_i2s.mic_process_cycles_last = i2s_mic_process_cycles_last;
-  audio_debug_i2s.mic_process_cycles_max = i2s_mic_process_cycles_max;
-  audio_debug_i2s.mic_process_cycle_budget = i2s_mic_process_cycle_budget;
-  audio_debug_i2s.mic_deadline_miss_blocks_total =
-      i2s_mic_process_deadline_miss_count;
-  audio_debug_i2s.mic_deadline_miss_blocks_delta =
-      audio_debug_counter_delta.i2s_mic_deadline_miss_blocks;
-  audio_debug_i2s.start_status = audio_out_start_status;
-  audio_debug_i2s.i2s_error_code = audio_out_i2s_error_code;
-  audio_debug_i2s.dma_error_code = audio_out_dma_error_code;
+       (audio_out_tx_diag.peak_s16 != 0U)) ? 1U : 0U;
+  audio_debug_i2s.ring_available_samples = audio_out_ring.available_samples;
+  audio_debug_i2s.ring_available_min_samples = audio_out_ring.available_min_samples;
+  audio_debug_i2s.ring_available_max_samples = audio_out_ring.available_max_samples;
+  audio_debug_i2s.ring_push_samples_total = audio_out_ring.push_sample_count;
+  audio_debug_i2s.ring_pop_samples_total = audio_out_ring.pop_sample_count;
+  audio_debug_i2s.start_status = audio_out_transport.start_status;
+  audio_debug_i2s.i2s_error_code = audio_out_transport.i2s_error_code;
+  audio_debug_i2s.dma_error_code = audio_out_transport.dma_error_code;
   audio_debug_i2s.counter_window_ms = audio_debug_counter_window_ms;
-  audio_debug_i2s.underrun_samples_total = audio_out_mic_underrun_count;
+  audio_debug_i2s.underrun_samples_total = audio_out_ring.underrun_sample_count;
   audio_debug_i2s.underrun_samples_delta =
       audio_debug_counter_delta.tx_underrun_samples;
-  audio_debug_i2s.overrun_samples_total = audio_out_mic_overrun_count;
+  audio_debug_i2s.overrun_samples_total = audio_out_ring.overrun_sample_count;
   audio_debug_i2s.overrun_samples_delta =
       audio_debug_counter_delta.tx_overrun_samples;
   audio_debug_i2s.runtime_error_events_total =
-      audio_out_i2s_runtime_error_count;
+      audio_out_transport.runtime_error_count;
   audio_debug_i2s.runtime_error_events_delta =
       audio_debug_counter_delta.tx_runtime_error_events;
-  audio_debug_i2s.output_limiter_samples_total = audio_out_limiter_count;
+  audio_debug_i2s.output_limiter_samples_total = audio_out_tx_diag.limiter_sample_count;
   audio_debug_i2s.output_limiter_samples_delta =
       audio_debug_counter_delta.tx_limiter_samples;
   __DMB();
@@ -1438,7 +1299,7 @@ int main(void)
 
   audio_input_source = AUDIO_INPUT_DEFAULT_SOURCE;
   audio_sample_slot_mode = AUDIO_I2S_MIC_SLOT_MODE;
-  audio_out_mic_repeat_factor = 1U;
+  audio_out_controls.repeat_factor = 1U;
 
 #if (AUDIO_OUTPUT_ENABLE != 0U)
 #if (AUDIO_OUTPUT_BOOT_TEST_TONE_MS != 0U)
@@ -1461,12 +1322,12 @@ int main(void)
 #if (AUX_CAPTURE_USE_DMA != 0U)
   if (AuxCapture_StartDma(&hadc1, &htim2) != HAL_OK)
   {
-    aux_capture_start_failed = 1U;
+    aux_adc_diag.start_failed = 1U;
   }
 #else
   if (AuxCapture_Start(&hadc1) != HAL_OK)
   {
-    aux_capture_start_failed = 1U;
+    aux_adc_diag.start_failed = 1U;
   }
 #endif
 #endif
@@ -1499,14 +1360,16 @@ int main(void)
 #endif
 
   diag_last_tick = HAL_GetTick();
-  diag_last_aux_block_count = aux_adc_half_count + aux_adc_full_count;
-  diag_last_aux_realtime_push_count = aux_output_realtime_push_count;
-  diag_last_aux_analysis_service_count = aux_analysis_service_count;
+  diag_last_aux_block_count = aux_adc_diag.half_count + aux_adc_diag.full_count;
+  diag_last_aux_realtime_push_count = aux_output_diag.realtime_push_count;
+  diag_last_aux_analysis_service_count = aux_analysis_diag.service_count;
   diag_last_i2s_block_count = audio_half_count + audio_full_count;
   diag_last_i2s_sample_count = i2s_mic_processed_sample_count;
   diag_last_i2s_analysis_service_count = i2s_mic_analysis_service_count;
-  diag_last_output_block_count = audio_out_half_count + audio_out_full_count;
-  diag_last_output_debug_update_count = audio_out_tx_debug_update_count;
+  diag_last_output_block_count =
+      audio_out_transport.half_callback_count +
+      audio_out_transport.full_callback_count;
+  diag_last_output_debug_update_count = audio_out_tx_diag.update_count;
   diag_last_fft_process_count = audio_fft_process_count;
   diag_last_display_draw_count = display_waveform_draw_count;
   diag_last_visualizer_update_count = audio_vis_update_count;
@@ -1554,7 +1417,7 @@ int main(void)
     uint32_t display_now_tick = HAL_GetTick();
     uint32_t analysis_queue_blocks =
         (audio_input_source == AUDIO_INPUT_SOURCE_AUX) ?
-        aux_analysis_queue_count : i2s_mic_analysis_queue_count;
+        aux_analysis_diag.queue_count : i2s_mic_analysis_queue_count;
     uint8_t display_due =
         ((display_ready == 1U) &&
          (display_waveform_enable != 0U) &&
@@ -1608,14 +1471,16 @@ int main(void)
     uint32_t diag_elapsed_ms = diag_now_tick - diag_last_tick;
     if (diag_elapsed_ms >= 1000U)
     {
-      uint32_t aux_blocks = aux_adc_half_count + aux_adc_full_count;
-      uint32_t aux_realtime_samples = aux_output_realtime_push_count;
-      uint32_t aux_analysis_blocks = aux_analysis_service_count;
+      uint32_t aux_blocks = aux_adc_diag.half_count + aux_adc_diag.full_count;
+      uint32_t aux_realtime_samples = aux_output_diag.realtime_push_count;
+      uint32_t aux_analysis_blocks = aux_analysis_diag.service_count;
       uint32_t i2s_blocks = audio_half_count + audio_full_count;
       uint32_t i2s_samples = i2s_mic_processed_sample_count;
       uint32_t i2s_analysis_blocks = i2s_mic_analysis_service_count;
-      uint32_t output_blocks = audio_out_half_count + audio_out_full_count;
-      uint32_t output_debug_updates = audio_out_tx_debug_update_count;
+      uint32_t output_blocks =
+          audio_out_transport.half_callback_count +
+          audio_out_transport.full_callback_count;
+      uint32_t output_debug_updates = audio_out_tx_diag.update_count;
       uint32_t fft_process_count = audio_fft_process_count;
       uint32_t display_draw_count = display_waveform_draw_count;
       uint32_t visualizer_update_count = audio_vis_update_count;
@@ -1626,17 +1491,17 @@ int main(void)
 #endif
       diag_last_tick = diag_now_tick;
 
-      diag_aux_blocks_per_sec = DiagnosticRatePerSecond(
+      aux_adc_diag.blocks_per_sec = DiagnosticRatePerSecond(
           aux_blocks - diag_last_aux_block_count, 1U, diag_elapsed_ms);
-      diag_aux_samples_per_sec = DiagnosticRatePerSecond(
+      aux_adc_diag.samples_per_sec = DiagnosticRatePerSecond(
           aux_blocks - diag_last_aux_block_count,
           AUX_CAPTURE_BUF_LEN,
           diag_elapsed_ms);
-      diag_aux_realtime_samples_per_sec = DiagnosticRatePerSecond(
+      aux_output_diag.samples_per_sec = DiagnosticRatePerSecond(
           aux_realtime_samples - diag_last_aux_realtime_push_count,
           1U,
           diag_elapsed_ms);
-      diag_aux_analysis_blocks_per_sec = DiagnosticRatePerSecond(
+      aux_analysis_diag.blocks_per_sec = DiagnosticRatePerSecond(
           aux_analysis_blocks - diag_last_aux_analysis_service_count,
           1U,
           diag_elapsed_ms);
